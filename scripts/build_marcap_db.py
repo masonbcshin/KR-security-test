@@ -20,7 +20,10 @@ def parse_args():
     p.add_argument("--db", required=True)
     p.add_argument("--start-year", type=int, required=True)
     p.add_argument("--end-year", type=int, required=True)
+    p.add_argument("--financial-start-year", type=int)
+    p.add_argument("--financial-end-year", type=int)
     p.add_argument("--cache-dir", default=".cache/marcap")
+    p.add_argument("--phase", choices=["all", "prices", "financial", "adjusted", "audit"], default="all")
     return p.parse_args()
 
 
@@ -103,6 +106,7 @@ def create_base_schema(conn: sqlite3.Connection):
     conn.executescript("""
     PRAGMA journal_mode=WAL;
     PRAGMA synchronous=NORMAL;
+    PRAGMA temp_store=MEMORY;
     CREATE TABLE IF NOT EXISTS daily_prices (
       stock_code TEXT NOT NULL,
       date TEXT NOT NULL,
@@ -165,17 +169,74 @@ def rebuild_stock_master(conn: sqlite3.Connection, all_meta: pd.DataFrame):
     data.to_sql("stocks", conn, if_exists="append", index=False, chunksize=2_000, method="multi")
 
 
-def load_financials(alphakrx_root: Path, db: Path):
+def build_prices(db: Path, cache: Path, start_year: int, end_year: int):
+    if db.exists():
+        db.unlink()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    meta = []
+    with sqlite3.connect(db) as con:
+        create_base_schema(con)
+        for year in range(start_year, end_year + 1):
+            f = cache / f"marcap-{year}.parquet"
+            print(f"[marcap] {year}: download", flush=True)
+            download(MARCAP_RAW.format(year=year), f)
+            raw = pd.read_parquet(f)
+            x = normalize_year(raw)
+            print(f"[marcap] {year}: {len(x):,} KOSPI/KOSDAQ rows", flush=True)
+            insert_year(con, x)
+            meta.append(x[["stock_code", "date", "current_name", "market_type", "shares_outstanding"]])
+            con.commit()
+            print(f"[marcap] {year}: committed", flush=True)
+        rebuild_stock_master(con, pd.concat(meta, ignore_index=True))
+        con.commit()
+        count = con.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+        print(f"[marcap] complete rows={count:,}", flush=True)
+
+
+def _financial_year(path: Path):
+    try:
+        return int(path.name[:4])
+    except (ValueError, TypeError):
+        return None
+
+
+def load_financials(alphakrx_root: Path, db: Path, start_year: int | None, end_year: int | None):
     sys.path.insert(0, str(alphakrx_root))
     from etl.financial_etl import FinancialDataLoader
     raw = alphakrx_root / "data" / "raw_financial"
     loader = FinancialDataLoader(str(db), str(raw))
     loader.connect()
     loader.create_tables()
+    files = sorted(f for f in raw.glob("*.zip") if "_CE_" not in f.name)
+    if start_year is not None:
+        files = [f for f in files if _financial_year(f) is not None and _financial_year(f) >= start_year]
+    if end_year is not None:
+        files = [f for f in files if _financial_year(f) is not None and _financial_year(f) <= end_year]
+    print(f"[financial] selected {len(files)} ZIP files ({start_year}~{end_year})", flush=True)
+    stats = {"files_processed": 0, "total_items": 0, "errors": 0}
     try:
-        stats = loader.process_all()
+        for i, f in enumerate(files, 1):
+            try:
+                _, items = loader.process_file(f)
+                stats["files_processed"] += 1
+                stats["total_items"] += items
+            except Exception as exc:
+                stats["errors"] += 1
+                print(f"[financial] ERROR {f.name}: {exc}", flush=True)
+            if i % 10 == 0 or i == len(files):
+                print(f"[financial] progress {i}/{len(files)}", flush=True)
+        cur = loader.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM financial_periods")
+        stats["total_periods"] = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM financial_items_bs_cf")
+        stats["bs_cf_items"] = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM financial_items_pl")
+        stats["pl_items"] = cur.fetchone()[0]
     finally:
         loader.close()
+    print(f"[financial] complete {stats}", flush=True)
+    if stats["errors"]:
+        raise RuntimeError(f"financial ETL had {stats['errors']} errors")
     return stats
 
 
@@ -212,41 +273,32 @@ def audit(db: Path) -> dict:
         return r
 
 
+def write_audit(db: Path):
+    result = audit(db)
+    Path("outputs").mkdir(exist_ok=True)
+    Path("outputs/data_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+
+
 def main():
     a = parse_args()
     alphakrx = Path(a.alphakrx_root).resolve()
     db = Path(a.db).resolve()
     cache = Path(a.cache_dir).resolve()
-    db.parent.mkdir(parents=True, exist_ok=True)
-    if db.exists():
-        db.unlink()
 
-    meta = []
-    with sqlite3.connect(db) as con:
-        create_base_schema(con)
-        for year in range(a.start_year, a.end_year + 1):
-            f = cache / f"marcap-{year}.parquet"
-            print(f"[marcap] {year}: download", flush=True)
-            download(MARCAP_RAW.format(year=year), f)
-            raw = pd.read_parquet(f)
-            x = normalize_year(raw)
-            print(f"[marcap] {year}: {len(x):,} KOSPI/KOSDAQ rows", flush=True)
-            insert_year(con, x)
-            meta.append(x[["stock_code", "date", "current_name", "market_type", "shares_outstanding"]])
-            con.commit()
-        all_meta = pd.concat(meta, ignore_index=True)
-        rebuild_stock_master(con, all_meta)
-        con.commit()
-
-    print("[financial] load AlphaKRX DART bulk files", flush=True)
-    stats = load_financials(alphakrx, db)
-    print(f"[financial] {stats}", flush=True)
-    print("[adjusted] build adjusted OHLC", flush=True)
-    build_adjusted_prices(alphakrx, db)
-    result = audit(db)
-    Path("outputs").mkdir(exist_ok=True)
-    Path("outputs/data_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    if a.phase in ("all", "prices"):
+        build_prices(db, cache, a.start_year, a.end_year)
+    if a.phase in ("all", "financial"):
+        if not db.exists():
+            raise FileNotFoundError(f"price DB does not exist: {db}")
+        load_financials(alphakrx, db, a.financial_start_year, a.financial_end_year)
+    if a.phase in ("all", "adjusted"):
+        if not db.exists():
+            raise FileNotFoundError(f"price DB does not exist: {db}")
+        print("[adjusted] build adjusted OHLC", flush=True)
+        build_adjusted_prices(alphakrx, db)
+    if a.phase in ("all", "audit"):
+        write_audit(db)
 
 
 if __name__ == "__main__":
