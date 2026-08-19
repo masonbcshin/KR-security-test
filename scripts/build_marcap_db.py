@@ -148,10 +148,9 @@ def insert_year(conn: sqlite3.Connection, x: pd.DataFrame):
         "stock_code", "date", "closing_price", "opening_price", "high_price",
         "low_price", "volume", "value", "market_cap", "change", "change_rate", "market_type"
     ]]
-    # pandas method='multi' expands every cell into one SQL statement and easily
-    # exceeds SQLite's host-parameter limit. Default executemany keeps each row
-    # parameterized independently and is both safe and fast enough here.
-    rows.to_sql("daily_prices", conn, if_exists="append", index=False, chunksize=20_000, method=None)
+    # 12 columns x 2,000 rows = 24,000 host parameters, below the common
+    # SQLite 32,766-variable limit while retaining vectorized multi-row INSERTs.
+    rows.to_sql("daily_prices", conn, if_exists="append", index=False, chunksize=2_000, method="multi")
 
 
 def rebuild_stock_master(conn: sqlite3.Connection, all_meta: pd.DataFrame):
@@ -163,7 +162,7 @@ def rebuild_stock_master(conn: sqlite3.Connection, all_meta: pd.DataFrame):
     data["current_sector_type"] = None
     data = data[["stock_code", "current_name", "current_market_type", "current_sector_type", "shares_outstanding", "is_active"]]
     conn.execute("DELETE FROM stocks")
-    data.to_sql("stocks", conn, if_exists="append", index=False, chunksize=10_000, method=None)
+    data.to_sql("stocks", conn, if_exists="append", index=False, chunksize=2_000, method="multi")
 
 
 def load_financials(alphakrx_root: Path, db: Path):
