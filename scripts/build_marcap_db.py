@@ -148,7 +148,10 @@ def insert_year(conn: sqlite3.Connection, x: pd.DataFrame):
         "stock_code", "date", "closing_price", "opening_price", "high_price",
         "low_price", "volume", "value", "market_cap", "change", "change_rate", "market_type"
     ]]
-    rows.to_sql("daily_prices", conn, if_exists="append", index=False, chunksize=50_000, method="multi")
+    # pandas method='multi' expands every cell into one SQL statement and easily
+    # exceeds SQLite's host-parameter limit. Default executemany keeps each row
+    # parameterized independently and is both safe and fast enough here.
+    rows.to_sql("daily_prices", conn, if_exists="append", index=False, chunksize=20_000, method=None)
 
 
 def rebuild_stock_master(conn: sqlite3.Connection, all_meta: pd.DataFrame):
@@ -160,7 +163,7 @@ def rebuild_stock_master(conn: sqlite3.Connection, all_meta: pd.DataFrame):
     data["current_sector_type"] = None
     data = data[["stock_code", "current_name", "current_market_type", "current_sector_type", "shares_outstanding", "is_active"]]
     conn.execute("DELETE FROM stocks")
-    data.to_sql("stocks", conn, if_exists="append", index=False, chunksize=20_000, method="multi")
+    data.to_sql("stocks", conn, if_exists="append", index=False, chunksize=10_000, method=None)
 
 
 def load_financials(alphakrx_root: Path, db: Path):
