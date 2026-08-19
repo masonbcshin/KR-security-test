@@ -38,14 +38,20 @@ jobs:
           if [[ "$TIER" == "full" ]]; then
             echo "data_start_year=2014" >> "$GITHUB_OUTPUT"
             echo "data_end_year=2026" >> "$GITHUB_OUTPUT"
+            echo "financial_start_year=2015" >> "$GITHUB_OUTPUT"
+            echo "financial_end_year=2025" >> "$GITHUB_OUTPUT"
             echo "feature_start=20150101" >> "$GITHUB_OUTPUT"
             echo "test_start=20180101" >> "$GITHUB_OUTPUT"
             echo "end=20260320" >> "$GITHUB_OUTPUT"
           else
+            # Integration smoke: preserve the 2018 Samsung split audit and enough
+            # price history for 756-day momentum, but evaluate only 2024.
             echo "data_start_year=2018" >> "$GITHUB_OUTPUT"
             echo "data_end_year=2024" >> "$GITHUB_OUTPUT"
-            echo "feature_start=20190101" >> "$GITHUB_OUTPUT"
-            echo "test_start=20220101" >> "$GITHUB_OUTPUT"
+            echo "financial_start_year=2019" >> "$GITHUB_OUTPUT"
+            echo "financial_end_year=2024" >> "$GITHUB_OUTPUT"
+            echo "feature_start=20210101" >> "$GITHUB_OUTPUT"
+            echo "test_start=20240101" >> "$GITHUB_OUTPUT"
             echo "end=20241231" >> "$GITHUB_OUTPUT"
           fi
           echo "tier=$TIER" >> "$GITHUB_OUTPUT"
@@ -74,16 +80,58 @@ jobs:
       - name: Syntax check
         run: python -m py_compile scripts/build_marcap_db.py scripts/run_portable_tournament.py
 
-      - name: Build public-data research DB
+      - name: Cache marcap yearly parquet
+        uses: actions/cache@v4
+        with:
+          path: .cache/marcap
+          key: marcap-${{ runner.os }}-${{ steps.tier.outputs.data_start_year }}-${{ steps.tier.outputs.data_end_year }}
+
+      - name: Build marcap price DB
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p outputs work
           python scripts/build_marcap_db.py \
+            --phase prices \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
             --start-year "${{ steps.tier.outputs.data_start_year }}" \
-            --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/build.log
+            --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/prices.log
+
+      - name: Load PIT financials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db.py \
+            --phase financial \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year "${{ steps.tier.outputs.data_start_year }}" \
+            --end-year "${{ steps.tier.outputs.data_end_year }}" \
+            --financial-start-year "${{ steps.tier.outputs.financial_start_year }}" \
+            --financial-end-year "${{ steps.tier.outputs.financial_end_year }}" | tee outputs/financial.log
+
+      - name: Build adjusted prices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db.py \
+            --phase adjusted \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year "${{ steps.tier.outputs.data_start_year }}" \
+            --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/adjusted.log
+
+      - name: Audit research DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db.py \
+            --phase audit \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year "${{ steps.tier.outputs.data_start_year }}" \
+            --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/audit.log
 
       - name: Run portable tournament
         shell: bash
