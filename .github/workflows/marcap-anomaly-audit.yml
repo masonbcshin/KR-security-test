@@ -1,0 +1,54 @@
+name: Marcap anomaly audit
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached full research DB
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Require full DB cache hit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
+          test -s work/krx_stock_data.db
+
+      - name: Query marcap anomalies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/audit_marcap_anomalies.py \
+            --db work/krx_stock_data.db \
+            --output-dir outputs/marcap_audit | tee outputs/marcap_audit.log
+          echo "### Marcap anomaly audit" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat outputs/marcap_audit/summary.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### Samsung yearly max" >> "$GITHUB_STEP_SUMMARY"
+          echo '```csv' >> "$GITHUB_STEP_SUMMARY"
+          cat outputs/marcap_audit/samsung_yearly_max.csv >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload anomaly audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: marcap-anomaly-audit
+          path: outputs/marcap_audit/**/*
+          retention-days: 14
