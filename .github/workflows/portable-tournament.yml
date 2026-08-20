@@ -78,7 +78,7 @@ jobs:
           test -f vendor/alphakrx/data/raw_financial/2018_4Q_BS_20250605032425.zip
 
       - name: Syntax check
-        run: python -m py_compile scripts/build_marcap_db.py scripts/run_portable_tournament.py scripts/run_portable_tournament_ci.py
+        run: python -m py_compile scripts/build_marcap_db.py scripts/build_marcap_db_ci.py scripts/run_portable_tournament.py scripts/run_portable_tournament_ci.py
 
       - name: Cache marcap yearly parquet
         uses: actions/cache@v4
@@ -86,12 +86,20 @@ jobs:
           path: .cache/marcap
           key: marcap-${{ runner.os }}-${{ steps.tier.outputs.data_start_year }}-${{ steps.tier.outputs.data_end_year }}
 
+      - name: Restore research DB cache
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-${{ steps.tier.outputs.data_start_year }}-${{ steps.tier.outputs.data_end_year }}-${{ steps.tier.outputs.financial_start_year }}-${{ steps.tier.outputs.financial_end_year }}
+
       - name: Build marcap price DB
+        if: steps.dbcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p outputs work
-          python scripts/build_marcap_db.py \
+          python scripts/build_marcap_db_ci.py \
             --phase prices \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
@@ -99,10 +107,11 @@ jobs:
             --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/prices.log
 
       - name: Load PIT financials
+        if: steps.dbcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/build_marcap_db.py \
+          python scripts/build_marcap_db_ci.py \
             --phase financial \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
@@ -112,10 +121,11 @@ jobs:
             --financial-end-year "${{ steps.tier.outputs.financial_end_year }}" | tee outputs/financial.log
 
       - name: Build adjusted prices
+        if: steps.dbcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/build_marcap_db.py \
+          python scripts/build_marcap_db_ci.py \
             --phase adjusted \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
@@ -126,12 +136,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/build_marcap_db.py \
+          mkdir -p outputs
+          python scripts/build_marcap_db_ci.py \
             --phase audit \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
             --start-year "${{ steps.tier.outputs.data_start_year }}" \
             --end-year "${{ steps.tier.outputs.data_end_year }}" | tee outputs/audit.log
+
+      - name: Save research DB cache
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-${{ steps.tier.outputs.data_start_year }}-${{ steps.tier.outputs.data_end_year }}-${{ steps.tier.outputs.financial_start_year }}-${{ steps.tier.outputs.financial_end_year }}
 
       - name: Run portable tournament
         shell: bash
