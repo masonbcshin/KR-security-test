@@ -2,6 +2,9 @@ name: Marcap anomaly audit
 
 on:
   pull_request:
+    paths:
+      - scripts/audit_marcap_anomalies.py
+      - .github/workflows/marcap-anomaly-audit.yml
   workflow_dispatch:
 
 permissions:
@@ -34,6 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p outputs
           python scripts/audit_marcap_anomalies.py \
             --db work/krx_stock_data.db \
             --output-dir outputs/marcap_audit | tee outputs/marcap_audit.log
