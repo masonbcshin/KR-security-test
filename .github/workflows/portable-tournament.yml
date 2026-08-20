@@ -34,9 +34,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # This commit intentionally makes the PR-triggered run a one-off FULL run.
-          # The workflow is restored to smoke-default immediately after the run is created.
-          TIER="${{ github.event.inputs.tier || 'full' }}"
+          TIER="${{ github.event.inputs.tier || 'smoke' }}"
           if [[ "$TIER" == "full" ]]; then
             # 2011 provides >756 trading days of price warmup before 2015 features.
             echo "data_start_year=2011" >> "$GITHUB_OUTPUT"
