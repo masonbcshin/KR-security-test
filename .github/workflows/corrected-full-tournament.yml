@@ -39,7 +39,12 @@ jobs:
           test -f vendor/alphakrx/ml/models/lgbm.py
 
       - name: Syntax check corrected runner
-        run: python -m py_compile scripts/run_portable_tournament.py scripts/run_corrected_tournament.py
+        run: >-
+          python -m py_compile
+          scripts/run_portable_tournament.py
+          scripts/run_long_reversal_challenger.py
+          scripts/run_corrected_tournament.py
+          scripts/run_corrected_tournament_authoritative.py
 
       - name: Restore cached full research DB
         id: dbcache
@@ -60,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p outputs
-          python scripts/run_corrected_tournament.py \
+          python scripts/run_corrected_tournament_authoritative.py \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
             --feature-start 20150101 \
