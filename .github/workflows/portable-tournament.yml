@@ -78,7 +78,7 @@ jobs:
           test -f vendor/alphakrx/data/raw_financial/2018_4Q_BS_20250605032425.zip
 
       - name: Syntax check
-        run: python -m py_compile scripts/build_marcap_db.py scripts/run_portable_tournament.py
+        run: python -m py_compile scripts/build_marcap_db.py scripts/run_portable_tournament.py scripts/run_portable_tournament_ci.py
 
       - name: Cache marcap yearly parquet
         uses: actions/cache@v4
@@ -137,7 +137,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/run_portable_tournament.py \
+          python scripts/run_portable_tournament_ci.py \
             --alphakrx-root vendor/alphakrx \
             --db work/krx_stock_data.db \
             --feature-start "${{ steps.tier.outputs.feature_start }}" \
