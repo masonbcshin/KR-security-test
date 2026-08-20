@@ -1,10 +1,6 @@
 name: Long-reversal challenger
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_long_reversal_challenger.py
-      - .github/workflows/long-reversal-challenger.yml
   workflow_dispatch:
 
 permissions:
