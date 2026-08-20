@@ -44,10 +44,13 @@ marcap은 역사적 시점의 전종목 행을 포함하므로 현재 상장종�
 - 42거래일 리밸런싱
 - ML: 3년 rolling train, 43거래일 embargo
 - T+1 수정종가 체결
-- 신규 rank <= 28, 기존보유 rank <= 90 유지
-- 최대 50종목, equal target weight
+- target 50종목, equal target weight
+- AlphaKRX식 hysteresis: 기존보유는 rank <= 90이면 우선 유지, 신규 종목은 rank <= 28을 먼저 채택
+- 위 조합으로 50자리가 차지 않으면 아직 미보유인 rank <= 90 종목으로 잔여 슬롯을 채움 (`buy_rank=28`은 strict entry ceiling이 아니라 priority threshold)
 - 매수비용 0.35%, 매도비용 0.55%
 - stop-loss / market-timing 없음
+
+`universe_cap` benchmark는 수백~천여 종목의 정확한 시총비중을 표현하기 위해 fractional shares를 사용합니다. 그렇지 않으면 1억원 가상계좌에서 고가 종목의 목표금액이 1주 가격보다 작아져 비정상적인 cash drag가 발생합니다. 체결일과 거래비용은 전략들과 동일합니다.
 
 ## 결과물
 
@@ -65,20 +68,25 @@ marcap은 역사적 시점의 전종목 행을 포함하므로 현재 상장종�
 - `winner_report.md`
 - `run_manifest.json`
 - `data_audit.json`
+- `portable_feature_compat.json`
 
 `position_ledger.csv`는 실제 T+1 진입/청산, 추가매수/부분매도까지 반영한 round-trip ledger입니다. T+1에 종목이 거래불가이면 가상 체결을 만들지 않습니다.
 
 ## GitHub Actions
 
-PR에서는 비용과 오류 탐지를 위해 기본적으로 smoke 구간을 실행합니다.
+PR에서는 통합 오류 탐지를 위한 smoke 구간을 실행합니다.
 
 - market data: 2018~2024
-- feature panel: 2019~2024
-- evaluation: 2022~2024
+- PIT financials: 2019~2024
+- feature panel: 2021~2024
+- evaluation: 2024
+
+Smoke는 전략 승자 판정용이 아니라 데이터→PIT 재무→수정주가→feature→ML→체결 ledger가 끝까지 연결되는지 검증하기 위한 실행입니다.
 
 워크플로의 `Run workflow`에서 `tier=full`을 선택하면:
 
-- market data: 2014~2026-03-20
+- market data: 2014~2026
+- PIT financials: 2015~2025
 - feature panel: 2015~2026-03-20
 - evaluation: 2018~2026-03-20
 
