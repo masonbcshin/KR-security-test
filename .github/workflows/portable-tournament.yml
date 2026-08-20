@@ -34,9 +34,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TIER="${{ github.event.inputs.tier || 'smoke' }}"
+          # This commit intentionally makes the PR-triggered run a one-off FULL run.
+          # The workflow is restored to smoke-default immediately after the run is created.
+          TIER="${{ github.event.inputs.tier || 'full' }}"
           if [[ "$TIER" == "full" ]]; then
-            echo "data_start_year=2014" >> "$GITHUB_OUTPUT"
+            # 2011 provides >756 trading days of price warmup before 2015 features.
+            echo "data_start_year=2011" >> "$GITHUB_OUTPUT"
             echo "data_end_year=2026" >> "$GITHUB_OUTPUT"
             echo "financial_start_year=2015" >> "$GITHUB_OUTPUT"
             echo "financial_end_year=2025" >> "$GITHUB_OUTPUT"
@@ -44,8 +47,6 @@ jobs:
             echo "test_start=20180101" >> "$GITHUB_OUTPUT"
             echo "end=20260320" >> "$GITHUB_OUTPUT"
           else
-            # Integration smoke: preserve the 2018 Samsung split audit and enough
-            # price history for 756-day momentum, but evaluate only 2024.
             echo "data_start_year=2018" >> "$GITHUB_OUTPUT"
             echo "data_end_year=2024" >> "$GITHUB_OUTPUT"
             echo "financial_start_year=2019" >> "$GITHUB_OUTPUT"
