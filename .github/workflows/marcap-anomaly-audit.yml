@@ -1,10 +1,6 @@
 name: Marcap anomaly audit
 
 on:
-  pull_request:
-    paths:
-      - scripts/audit_marcap_anomalies.py
-      - .github/workflows/marcap-anomaly-audit.yml
   workflow_dispatch:
 
 permissions:
