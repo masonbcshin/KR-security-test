@@ -1,10 +1,6 @@
 name: Corrected KR-CORE full tournament
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_corrected_tournament.py
-      - .github/workflows/corrected-full-tournament.yml
   workflow_dispatch:
 
 permissions:
