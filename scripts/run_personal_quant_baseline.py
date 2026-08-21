@@ -115,10 +115,24 @@ def save_fractional_reference(root: Path, sig: pd.DataFrame, events, db: Path, c
 
 
 def live_equity(eq: pd.DataFrame):
+    """Operational window: first invested day through pre-liquidation day.
+
+    The T+1 day before the first execution is intentionally excluded from cash
+    gates; otherwise every candidate would have a mechanical 100% max-cash
+    observation unrelated to portfolio implementability.  The forced terminal
+    liquidation row is excluded for the same reason.
+    """
     e = eq.copy()
     if len(e) > 1 and int(e.iloc[-1].get("n_positions", 0)) == 0:
         e = e.iloc[:-1].copy()
-    return e
+    if e.empty:
+        return e
+    positions = pd.to_numeric(e["n_positions"], errors="coerce").fillna(0)
+    invested = positions.gt(0).to_numpy()
+    if not invested.any():
+        return e.iloc[0:0].copy()
+    first = int(np.flatnonzero(invested)[0])
+    return e.iloc[first:].copy()
 
 
 def tracking_error(eq: pd.DataFrame, ref_eq: pd.DataFrame):
@@ -278,6 +292,7 @@ def main():
         "weighting": "signal-date market-cap weight within top-N, renormalized",
         "share_policy": "integer whole shares for candidates; fractional shares only for authoritative reference",
         "reference": "full eligible universe fractional cap",
+        "operational_window": "first invested day through pre-terminal-liquidation day",
         "fidelity_gates": FIDELITY_GATES,
         "selection_rule": "within each capital tier choose the smallest N that passes every fidelity gate; do not select capital tier by historical return",
         "recommendations_by_capital": recommendations,
