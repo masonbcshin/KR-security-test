@@ -1,10 +1,6 @@
 name: Personal-quant investable cap baseline
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_personal_quant_baseline.py
-      - .github/workflows/personal-quant-baseline.yml
   workflow_dispatch:
 
 permissions:
