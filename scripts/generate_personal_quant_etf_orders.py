@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Generate provisional target holdings for the promoted two-ETF personal-quant baseline.
 
-The strategy rule is already frozen by the ETF translation research:
+Frozen production baseline after the pre-registered cadence robustness test:
 - KODEX KOSPI (226490) weight = eligible-universe KOSPI market-cap share
 - KODEX KOSDAQ150 (229200) weight = eligible-universe KOSDAQ market-cap share
-- 42 trading-day cadence, continued from the last authoritative signal 2026-01-19
+- target-weight refresh every 84 trading days
+- cadence sequence originates at the original research first signal, 2018-01-02
 
-This script is a productionization calculator, not a backtest optimizer.  It emits
+This script is a productionization calculator, not a backtest optimizer. It emits
 TARGET holdings, not brokerage orders, unless current holdings are supplied by a
 later execution layer.
 
@@ -32,8 +33,10 @@ from run_long_reversal_challenger import _register_corrected_mom36
 
 ETF_CODES = {"kospi": "226490", "kosdaq": "229200"}
 ETF_LABELS = {"226490": "KODEX KOSPI", "229200": "KODEX KOSDAQ150"}
-ANCHOR_SIGNAL = "20260119"
-HORIZON = 42
+SCHEDULE_ORIGIN = "20180102"
+HISTORICAL_TEST_END = "20260320"
+HISTORICAL_84_LAST_SIGNAL = "20251117"
+HORIZON = 84
 DEFAULT_CAPITALS = [10_000_000.0, 30_000_000.0, 100_000_000.0]
 MAX_FINANCIAL_STALENESS_DAYS = 180
 MAX_MARKET_STALENESS_DAYS = 7
@@ -57,6 +60,16 @@ def db_availability(db: Path):
     if not fin_max:
         raise RuntimeError("financial_periods has no available_date")
     return str(market_max), str(fin_max)
+
+
+def db_trading_dates(db: Path, start: str, end: str):
+    with sqlite3.connect(db) as con:
+        x = pd.read_sql_query(
+            "SELECT DISTINCT date FROM daily_prices WHERE date BETWEEN ? AND ? ORDER BY date",
+            con,
+            params=[start, end],
+        )
+    return x["date"].astype(str).tolist()
 
 
 def next_date_after(dates: list[str], date: str):
@@ -131,6 +144,25 @@ def main():
     market_stale_days = int((pd.Timestamp.today().normalize() - market_dt).days)
     financial_stale_days = int((market_dt - fin_dt).days)
 
+    # Production schedule is continued from the original research origin using
+    # the 84-day cadence selected by the pre-registered robustness test.
+    trading_dates = db_trading_dates(db, SCHEDULE_ORIGIN, market_max)
+    if SCHEDULE_ORIGIN not in trading_dates:
+        raise RuntimeError(f"schedule origin {SCHEDULE_ORIGIN} missing from DB trading calendar")
+    origin_idx = trading_dates.index(SCHEDULE_ORIGIN)
+    scheduled_all = trading_dates[origin_idx::HORIZON]
+    historical_schedule = [d for d in scheduled_all if d <= HISTORICAL_TEST_END]
+    if not historical_schedule or historical_schedule[-1] != HISTORICAL_84_LAST_SIGNAL:
+        raise RuntimeError(
+            "84-day production calendar does not reproduce the robustness-test schedule: "
+            f"expected historical last signal {HISTORICAL_84_LAST_SIGNAL}, got "
+            f"{historical_schedule[-1] if historical_schedule else None}"
+        )
+    latest_signal = scheduled_all[-1]
+    execution_date = next_date_after(trading_dates, latest_signal)
+
+    # Keep the original research feature/universe definition (42-day target
+    # horizon) while the ETF *refresh* cadence is independently set to 84 days.
     cfg = rpt.Config("20260101", "20260101", market_max)
     feature_engineer = _register_corrected_mom36(alphakrx, db, cfg)
     fe = feature_engineer(str(db))
@@ -152,13 +184,8 @@ def main():
 
     panel_dates = sorted(panel["date"].astype(str).unique())
     latest_panel_date = panel_dates[-1]
-    if ANCHOR_SIGNAL not in panel_dates:
-        raise RuntimeError(f"anchor signal {ANCHOR_SIGNAL} missing from 2026 eligible panel")
-
-    anchor_idx = panel_dates.index(ANCHOR_SIGNAL)
-    scheduled = panel_dates[anchor_idx::HORIZON]
-    latest_signal = scheduled[-1]
-    execution_date = next_date_after(panel_dates, latest_signal)
+    if latest_signal not in panel_dates:
+        raise RuntimeError(f"latest scheduled 84-day signal {latest_signal} missing from eligible panel")
 
     day = panel[panel["date"].eq(latest_signal)].copy()
     day["market_cap"] = pd.to_numeric(day["market_cap"], errors="coerce")
@@ -191,15 +218,16 @@ def main():
 
     status = {
         "strategy": "KODEX KOSPI + KODEX KOSDAQ150 dynamic eligible-market-cap split",
-        "anchor_signal": ANCHOR_SIGNAL,
+        "schedule_origin": SCHEDULE_ORIGIN,
         "horizon_trading_days": HORIZON,
+        "historical_schedule_guard_last_signal": historical_schedule[-1],
         "db_market_max_date": market_max,
         "latest_panel_date": latest_panel_date,
         "latest_financial_available_date": fin_max,
         "market_staleness_calendar_days": market_stale_days,
         "financial_staleness_vs_market_days": financial_stale_days,
         "latest_scheduled_signal": latest_signal,
-        "scheduled_signals_2026": scheduled,
+        "scheduled_signals_2026": [d for d in scheduled_all if d.startswith("2026")],
         "signal_execution_date": execution_date,
         "etf_price_date": price_date,
         "eligible_names": int(day["stock_code"].nunique()),
@@ -219,7 +247,7 @@ def main():
             ] if not cond
         ],
         "note": "Target holdings are indicative baseline holdings, not submitted brokerage orders.",
-        "config": asdict(cfg),
+        "research_feature_config": asdict(cfg),
     }
     (out / "live_status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(status, ensure_ascii=False, indent=2), flush=True)
