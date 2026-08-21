@@ -1,151 +1,213 @@
-# Personal-Quant Baseline Translation Verdict — 2026-08-21
+# Personal-Quant Production Baseline Verdict — 2026-08-21
 
-## Decision
+## Final decision
 
-The fractional full-eligible-universe `universe_cap` research winner is **not directly executable at typical small personal-account capital**.
+For an individual Korean quant, the preferred baseline is now:
 
-Under the pre-registered translation matrix, only one stock-basket cell passed every fidelity and lot-feasibility gate:
+> **KODEX 코스피 (226490) + KODEX 코스닥150 (229200), dynamically weighted by the eligible research universe's KOSPI/KOSDAQ market-cap split and rebalanced every 42 trading days.**
 
-- **KRW 100m + Top 50 market-cap-weighted basket**
+This two-ETF proxy is the **only pre-registered ETF candidate that passed every performance-fidelity gate**, and it also passed the whole-share cash-feasibility gates at KRW 10m, KRW 30m, and KRW 100m.
 
-KRW 10m and KRW 30m produced no passing stock-basket translation.
+Therefore the earlier stock-only result — KRW 100m + Top 50 cap-weighted stocks — remains a valid **stock-basket baseline candidate**, but it is superseded as the preferred personal-quant baseline by the two-ETF proxy because the ETF implementation is executable at all tested capital tiers with dramatically lower order complexity.
 
-This is an **investable stock-baseline candidate**, not yet a production recommendation. Historical return tracking and whole-share feasibility were deliberately separated because the research database uses backward-adjusted prices for return continuity; such adjusted prices are invalid for historical whole-share sizing around splits and similar corporate actions.
+No tested active factor strategy is promoted. The ETF result is a **benchmark translation**, not a new alpha strategy.
 
-Authoritative run: GitHub Actions `32437739907`, artifact `kr-personal-quant-baseline`, artifact ID `9431546210`, digest `sha256:e93792926c0b4471d41a5a7c64653795bb2296df98cf2b976290780e06468256`.
+## Authoritative sources
 
-Machine-readable result: `results/2026-08-21-personal-quant-baseline.csv`.
+ETF full run:
 
-## Pre-registered methodology
+- GitHub Actions run: `32444932528`
+- artifact: `kr-personal-quant-etf-proxy`
+- artifact ID: `9433892498`
+- artifact digest: `sha256:d8fc35d73cba12788e7ae41e91d2ceffeaf092d4d10ae3ca12639b60268a74f2`
 
-PR #1 comments `5364180007` and `5364210629` fixed the experiment before results were inspected.
+Independent ETF price-source snapshot:
 
-Matrix:
+- GitHub Actions run: `32445510664`
+- artifact ID: `9433914479`
+- digest: `sha256:809d40774214565fd19cf8786330cacf519f00e59046e745df629895165bc204`
 
-- capital: KRW 10m / 30m / 100m
-- breadth: Top 20 / 50 / 100 eligible stocks by signal-date market cap
-- weighting: market-cap weight within the selected Top-N
-- same common tournament universe
-- 42-trading-day rebalance
+The lightweight artifact replay and the full panel rebuild agreed on CAGR, Sharpe, MDD, and tracking error to floating-point tolerance (maximum observed difference below `1e-16`).
+
+Machine-readable results:
+
+- `results/2026-08-21-etf-proxy-performance.csv`
+- `results/2026-08-21-etf-proxy-capital.csv`
+- prior stock-only result: `results/2026-08-21-personal-quant-baseline.csv`
+
+## Pre-registration
+
+ETF candidates and gates were frozen in PR #1 comment `5364956891` before ETF comparative performance was inspected.
+
+Candidates:
+
+1. `kodex_kospi` — 100% KODEX 코스피 (226490)
+2. `kodex_200` — 100% KODEX 200 (069500)
+3. `kodex_kospi_kq150_split` — KODEX 코스피 + KODEX 코스닥150 (229200), dynamic KOSPI/KOSDAQ eligible-universe market-cap split
+4. `kodex_200_kq150_split` — KODEX 200 + KODEX 코스닥150, same dynamic split
+
+Common rules:
+
+- evaluation: 2018-01-01 through 2026-03-20
+- FinanceDataReader `0.9.201`, `NAVER:` daily-price path
+- no ETF cash-distribution reinvestment, matching the stock research benchmark's dividend-excluded price-return convention
+- same 42-trading-day signal schedule
 - T+1 execution
-- buy cost 0.35%, sell cost 0.55%
-- no factor, threshold, rank, timing, leverage, or holding-period tuning
+- same modeled costs as the stock research benchmark: buy 0.35%, sell 0.55%
+- whole-share feasibility tested separately at KRW 10m / 30m / 100m
 
-Historical Top-N tracking is simulated fractionally against the authoritative full-universe fractional cap benchmark. Whole-share feasibility is measured separately at each rebalance with actual raw `daily_prices.closing_price` on T+1 and whole-share floor sizing after reserving buy cost.
-
-A capital/N cell passes only if both components pass.
-
-Fidelity gates:
+Performance fidelity gates:
 
 - annualized tracking error <= 5.0%
 - absolute CAGR gap <= 1.5 percentage points
 - absolute Sharpe gap <= 0.10
 - absolute MDD gap <= 5 percentage points
+- ETF data coverage >= 99%
+
+Whole-share gates:
+
 - average residual cash <= 5%
 - maximum residual cash <= 15%
-- average achieved position count >= 90% of target N
 
-## Reference reproduction
+Selection rule:
 
-The newly generated full-universe fractional reference reproduced the existing authoritative benchmark exactly at the guarded metrics:
+- every performance and lot gate must pass;
+- among multiple passers, prefer fewer instruments, then lower tracking error;
+- do not select a candidate because it had the highest historical return;
+- do not weaken gates after observing results.
 
-- CAGR: 10.695381%
-- Sharpe: 0.599321
-- MDD: -40.968565%
+## Data audit
 
-Validation differences versus the persisted authoritative values were exactly `0.0` for all three metrics.
+All three ETF price series passed the pre-registered integrity test.
 
-## Historical Top-N tracking
+| ETF | Rows (2017-12-01~2026-03-20) | Max abs 1-day move | >30% rows | Bad closes | Zero-volume rows |
+|---|---:|---:|---:|---:|---:|
+| KODEX 200 | 2,034 | 12.46% | 0 | 0 | 0 |
+| KODEX 코스피 | 2,034 | 12.40% | 0 | 0 | 0 |
+| KODEX 코스닥150 | 2,034 | 14.74% | 0 | 0 | 0 |
 
-| Basket | CAGR | Sharpe | MDD | Tracking error | CAGR gap | Historical gate |
-|---|---:|---:|---:|---:|---:|---|
-| Top 20 | 13.39% | 0.665 | -38.95% | 5.96% | +2.69pp | **FAIL** |
-| Top 50 | 12.14% | 0.641 | -37.06% | 3.41% | +1.45pp | **PASS** |
-| Top 100 | 11.65% | 0.633 | -38.66% | 2.06% | +0.95pp | **PASS** |
+Within the actual 2018-01-02~2026-03-20 evaluation dates, each candidate leg had 100% coverage against the authoritative reference equity calendar.
 
-Top 20 is rejected as a benchmark translation despite its higher historical return because it fails the pre-registered tracking-error and CAGR-gap gates. The experiment does not reward accidental historical outperformance when the objective is benchmark translation.
+## Authoritative reference reproduction
 
-Subperiod Sharpe:
+The ETF full runner rebuilt the common eligible universe and reproduced the existing fractional full-cap benchmark exactly at the guarded metrics:
 
-| Period | Full cap | Top 50 | Top 100 |
-|---|---:|---:|---:|
-| 2018–2021 | 0.386 | 0.398 | 0.391 |
-| 2022–2024 | -0.398 | -0.369 | -0.369 |
-| 2025–2026-03 | 2.636 | 2.702 | 2.685 |
+- CAGR: **10.695381%**
+- Sharpe: **0.599321**
+- MDD: **-40.968565%**
 
-Top 50 and Top 100 preserve the broad regime behavior of the reference reasonably well under the registered tracking gates.
+Validation differences were `0.0` for CAGR, Sharpe, and MDD.
 
-## Raw-price whole-share feasibility
+## ETF performance-fidelity result
 
-### KRW 10m
+| Candidate | CAGR | Sharpe | MDD | Tracking error | CAGR gap | Sharpe gap | Result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| KODEX 코스피 | 12.92% | 0.717 | -41.27% | 4.10% | +2.23pp | +0.117 | **FAIL** |
+| KODEX 200 | 14.70% | 0.761 | -38.09% | 4.28% | +4.00pp | +0.161 | **FAIL** |
+| **KODEX 코스피 + 코스닥150 split** | **12.09%** | **0.671** | **-43.24%** | **3.66%** | **+1.40pp** | **+0.072** | **PASS** |
+| KODEX 200 + 코스닥150 split | 13.75% | 0.718 | -40.48% | 3.48% | +3.05pp | +0.118 | **FAIL** |
 
-No basket is feasible under the registered cash/fill gates.
+The single-ETF and KODEX-200 variants are rejected **despite higher historical returns** because they drift too far from the benchmark under the pre-registered CAGR/Sharpe fidelity gates.
 
-- Top 20: average cash 26.87%, max cash 41.15%, average position fill 65.4%
-- Top 50: average cash 39.16%, max cash 46.64%, average fill 43.0%
-- Top 100: average cash 46.28%, max cash 53.98%, average fill 27.0%
+The selected two-ETF proxy is not the highest-return candidate. It is the candidate that actually satisfies the translation objective.
 
-### KRW 30m
+## Subperiod stability of the selected proxy
 
-No basket passes.
+| Period | Full-cap Sharpe | Selected ETF proxy Sharpe |
+|---|---:|---:|
+| 2018–2021 | 0.386 | 0.403 |
+| 2022–2024 | -0.398 | -0.233 |
+| 2025–2026-03 | 2.636 | 2.695 |
 
-- Top 20: average cash 9.74%, max 17.77%, average fill 94.2%; lot feasibility improves, but Top 20 already fails historical tracking
-- Top 50: average cash 16.60%, max 26.47%, average fill 82.0%
-- Top 100: average cash 22.59%, max 31.55%, average fill 64.0%
+Selected-proxy returns by subperiod:
 
-### KRW 100m
+- 2018–2021: +25.78%
+- 2022–2024: -15.71%
+- 2025–2026-03: +139.95%
 
-- Top 20: lot gates pass, but historical tracking fails
-- **Top 50: all gates pass**
-- Top 100: historical tracking passes, but average cash 7.43% exceeds the 5% gate
+The proxy preserves the same broad regime behavior as the full-cap benchmark rather than passing only because of one isolated subperiod.
 
-Top 50 / KRW 100m raw-price lot statistics:
+## Whole-share feasibility by capital
 
-- average residual cash: **4.87%**
-- maximum residual cash: **9.50%**
-- average achieved positions: **49.54 / 50**
-- minimum achieved positions: **46 / 50**
-- average position fill: **99.08%**
-- minimum position fill: **92%**
-- missing/untradable target observations: **0**
+For the selected KODEX 코스피 + KODEX 코스닥150 proxy:
 
-The worst cash snapshot occurred at the 2026-01-19 signal / 2026-01-20 execution: 46 of 50 names were affordable and residual cash was 9.50%.
+| Capital | Avg residual cash | Max residual cash | Instruments achieved | Missing/untradable | Result |
+|---:|---:|---:|---:|---:|---|
+| KRW 10m | **0.191%** | **0.391%** | 2 / 2 at every snapshot | 0 | **PASS** |
+| KRW 30m | **0.061%** | **0.161%** | 2 / 2 at every snapshot | 0 | **PASS** |
+| KRW 100m | **0.0167%** | **0.0444%** | 2 / 2 at every snapshot | 0 | **PASS** |
 
-## Operational interpretation
+This resolves the main weakness of the direct-stock translation. The stock basket required about KRW 100m before a Top-50 implementation passed the registered lot constraints; the ETF proxy passes from KRW 10m in the tested grid.
 
-The Top 50 historical basket generated about 311 transactions per year in the fractional tracking simulation, with gross turnover around 0.38x average equity per year. This is automatable but materially more operationally complex than a one- or two-ETF baseline.
+## Dynamic allocation rule
 
-Concentration also remains meaningful: the maximum single-name target weight observed in the Top 50 lot snapshots was about 38.5%. This does not retroactively fail the pre-registered experiment, because no concentration cap was registered. It is an operational/risk flag for later deployment comparison.
+The selected baseline is **not a fixed 90/10 portfolio**.
 
-## Important limitation
+At each 42-trading-day signal date:
 
-The passing Top 50 / KRW 100m cell does **not** yet constitute a full path-dependent historical whole-share backtest.
+1. rebuild the same eligible stock universe used by the benchmark;
+2. sum eligible market capitalization separately for KOSPI and KOSDAQ;
+3. set KODEX 코스피 weight = KOSPI eligible market cap / total eligible market cap;
+4. set KODEX 코스닥150 weight = KOSDAQ eligible market cap / total eligible market cap;
+5. execute the rebalance on T+1.
 
-Reason:
+Across the 48 historical signal dates:
 
-- adjusted prices are required for clean return continuity through splits and similar corporate actions;
-- raw prices are required to know how many whole shares an investor could actually buy at each historical execution date;
-- naïvely using the backward-adjusted price for lot sizing materially understates historical per-share cash requirements.
+- average KOSPI weight: **89.90%**
+- average KOSDAQ weight: **10.10%**
+- KOSPI weight range: **86.02% to 93.63%**
 
-Therefore this phase proves two separate things:
+The last backtest signal on 2026-01-19 was approximately:
 
-1. Top 50 historically tracks the research winner closely enough under the registered fidelity gates; and
-2. KRW 100m is sufficient to form those Top 50 target weights with raw T+1 prices under the registered lot gates.
+- KODEX 코스피: **93.63%**
+- KODEX 코스닥150: **6.37%**
 
-It does not yet prove an exact path-dependent whole-share P&L series after every corporate action.
+That is a historical example only, not a current 2026-08 live allocation.
 
-## Current personal-quant status
+## Comparison with the stock-only candidate
 
-- KRW 10m stock-basket cap translation: **REJECT**
-- KRW 30m stock-basket cap translation: **REJECT**
-- KRW 100m Top 20: **REJECT** — tracking fidelity
-- KRW 100m Top 50: **PASS AS STOCK-BASELINE CANDIDATE**
-- KRW 100m Top 100: **REJECT** — residual cash gate
+Earlier direct-stock translation found:
 
-## Next phase
+- KRW 10m: no passing stock basket
+- KRW 30m: no passing stock basket
+- KRW 100m: Top 50 was the only passing stock-basket cell
 
-Do not optimize Top-N further on this history.
+The KRW 100m Top-50 stock candidate required roughly 311 transactions/year in the fractional tracking simulation and exhibited a maximum historical single-name target weight around 38.5%.
 
-The next phase is a separately pre-registered **ETF / index-proxy baseline tournament**. Its purpose is to determine whether a much simpler one- or two-ETF implementation can provide a better personal-quant baseline, especially for KRW 10m and KRW 30m where direct stock baskets failed.
+The selected ETF proxy requires only two instruments and passes the same practical cash gates at all tested capital tiers. For a personal quant whose objective is to establish a robust baseline before searching for alpha, the ETF proxy therefore has the better implementation profile.
 
-Candidate building blocks must have live history covering the test window and must be fixed before their comparative result is inspected. Initial public-product candidates include broad KOSPI and KOSDAQ index ETFs; exact symbols, data availability, blend rule, dividend treatment, costs, and rebalance rule must be audited and registered before execution.
+## Current personal-quant hierarchy
+
+1. **Preferred production baseline candidate:** KODEX 코스피 + KODEX 코스닥150, dynamic eligible-market-cap split
+2. **Stock-only fallback / research comparator:** KRW 100m + Top-50 eligible stocks, cap-weighted
+3. **Best tested active strategy:** Long-Reversal — retained for research, **not promoted**
+4. KR-CORE / other tested active models — rejected under the existing tournament
+
+## What is and is not proven
+
+Proven under this retrospective/pseudo-OOS research framework:
+
+- the two-ETF proxy tracks the winning full-cap research benchmark within every pre-registered performance gate;
+- whole-share implementation is feasible at KRW 10m, KRW 30m, and KRW 100m;
+- the result independently reproduces through both a full common-panel rebuild and an artifact-based replay.
+
+Not proven:
+
+- genuine untouched forward OOS alpha;
+- that the ETF proxy is globally optimal;
+- that live slippage/taxes will exactly match the conservative stock-cost assumptions;
+- that the historical last allocation should be used today without rebuilding current data.
+
+## Next production phase
+
+The benchmark-selection phase is now complete enough to stop searching for another baseline on the same history.
+
+The next useful work is **productionization**, not further historical tuning:
+
+1. build a current eligible-universe market-cap split calculator;
+2. produce exact two-ETF whole-share target orders from account equity and T+1/current executable prices;
+3. add drift / rebalance threshold reporting without changing the registered 42-day research rule until separately tested;
+4. paper-run the ETF baseline forward;
+5. only then compare genuinely new active challengers against this investable ETF baseline.
+
+Do not retune the ETF blend, Top-N, KR-CORE, or Long-Reversal on the same 2018–2026 history merely to improve the historical score.
