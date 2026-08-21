@@ -1,10 +1,6 @@
 name: Personal-quant ETF proxy baseline
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_etf_proxy_baseline.py
-      - .github/workflows/etf-proxy-baseline.yml
   workflow_dispatch:
 
 permissions:
