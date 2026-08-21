@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Generate provisional target holdings for the promoted two-ETF personal-quant baseline.
+
+The strategy rule is already frozen by the ETF translation research:
+- KODEX KOSPI (226490) weight = eligible-universe KOSPI market-cap share
+- KODEX KOSDAQ150 (229200) weight = eligible-universe KOSDAQ market-cap share
+- 42 trading-day cadence, continued from the last authoritative signal 2026-01-19
+
+This script is a productionization calculator, not a backtest optimizer.  It emits
+TARGET holdings, not brokerage orders, unless current holdings are supplied by a
+later execution layer.
+
+A stale PIT-financial feed does not silently pass: outputs are marked
+LIVE_READY=false when the latest financial available_date is too old.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import FinanceDataReader as fdr
+
+import run_portable_tournament as rpt
+from run_long_reversal_challenger import _register_corrected_mom36
+
+
+ETF_CODES = {"kospi": "226490", "kosdaq": "229200"}
+ETF_LABELS = {"226490": "KODEX KOSPI", "229200": "KODEX KOSDAQ150"}
+ANCHOR_SIGNAL = "20260119"
+HORIZON = 42
+DEFAULT_CAPITALS = [10_000_000.0, 30_000_000.0, 100_000_000.0]
+MAX_FINANCIAL_STALENESS_DAYS = 180
+MAX_MARKET_STALENESS_DAYS = 7
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--alphakrx-root", required=True)
+    p.add_argument("--db", required=True)
+    p.add_argument("--output", default="outputs/personal_quant_live")
+    p.add_argument("--capitals", default=",".join(str(int(x)) for x in DEFAULT_CAPITALS))
+    return p.parse_args()
+
+
+def db_availability(db: Path):
+    with sqlite3.connect(db) as con:
+        market_max = con.execute("SELECT MAX(date) FROM daily_prices").fetchone()[0]
+        fin_max = con.execute("SELECT MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone()[0]
+    if not market_max:
+        raise RuntimeError("daily_prices has no data")
+    if not fin_max:
+        raise RuntimeError("financial_periods has no available_date")
+    return str(market_max), str(fin_max)
+
+
+def next_date_after(dates: list[str], date: str):
+    later = [d for d in dates if d > date]
+    return later[0] if later else None
+
+
+def fetch_etf_closes(end_date: str):
+    start = (pd.Timestamp(end_date) - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
+    end = pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    series = {}
+    for code in ETF_LABELS:
+        x = fdr.DataReader(f"NAVER:{code}", start, end).copy().reset_index()
+        if x.empty:
+            raise RuntimeError(f"empty ETF data for {code}")
+        if "Date" not in x.columns:
+            x = x.rename(columns={x.columns[0]: "Date"})
+        x["date"] = pd.to_datetime(x["Date"], errors="coerce").dt.strftime("%Y%m%d")
+        x["Close"] = pd.to_numeric(x["Close"], errors="coerce")
+        x["Volume"] = pd.to_numeric(x["Volume"], errors="coerce")
+        x = x[(x["date"] <= end_date) & np.isfinite(x["Close"]) & (x["Close"] > 0) & (x["Volume"].fillna(0) > 0)]
+        if x.empty:
+            raise RuntimeError(f"no tradable ETF close <= {end_date} for {code}")
+        series[code] = x[["date", "Close"]].drop_duplicates("date", keep="last").set_index("date")["Close"]
+    common = sorted(set(series["226490"].index) & set(series["229200"].index))
+    if not common:
+        raise RuntimeError("no common ETF price date")
+    d = common[-1]
+    return d, {code: float(series[code].loc[d]) for code in series}
+
+
+def target_holdings(capital: float, weights: dict[str, float], prices: dict[str, float], buy_cost: float):
+    gross_budget = float(capital) / (1.0 + buy_cost)
+    rows = []
+    invested = 0.0
+    for code in [ETF_CODES["kospi"], ETF_CODES["kosdaq"]]:
+        w = float(weights[code])
+        p = float(prices[code])
+        shares = int(np.floor(gross_budget * w / p))
+        gross = shares * p
+        invested += gross
+        rows.append({
+            "capital_krw": capital,
+            "stock_code": code,
+            "label": ETF_LABELS[code],
+            "target_weight": w,
+            "price": p,
+            "target_shares": shares,
+            "gross_notional": gross,
+        })
+    estimated_buy_cost = invested * buy_cost
+    residual = capital - invested - estimated_buy_cost
+    for r in rows:
+        r["estimated_total_buy_cost"] = estimated_buy_cost
+        r["portfolio_residual_cash"] = residual
+        r["portfolio_residual_cash_ratio"] = residual / capital
+    return rows
+
+
+def main():
+    a = parse_args()
+    alphakrx = Path(a.alphakrx_root).resolve()
+    db = Path(a.db).resolve()
+    out = Path(a.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(alphakrx))
+    capitals = [float(x.strip()) for x in a.capitals.split(",") if x.strip()]
+
+    market_max, fin_max = db_availability(db)
+    market_dt = pd.Timestamp(market_max)
+    fin_dt = pd.Timestamp(fin_max)
+    market_stale_days = int((pd.Timestamp.today().normalize() - market_dt).days)
+    financial_stale_days = int((market_dt - fin_dt).days)
+
+    cfg = rpt.Config("20260101", "20260101", market_max)
+    feature_engineer = _register_corrected_mom36(alphakrx, db, cfg)
+    fe = feature_engineer(str(db))
+    print(f"[live] build 2026 eligible panel through {market_max}", flush=True)
+    panel = fe.prepare_ml_data(
+        start_date="20260101",
+        end_date=market_max,
+        target_horizon=cfg.horizon,
+        min_market_cap=cfg.min_market_cap,
+        use_cache=False,
+        n_workers=1,
+    )
+    if panel.empty:
+        raise RuntimeError("empty 2026 feature panel")
+    panel = rpt.add_q5_proxy_fields(panel, db)
+    panel = rpt.common_universe(panel).sort_values(["date", "stock_code"]).reset_index(drop=True)
+    if panel.empty:
+        raise RuntimeError("empty 2026 common eligible universe")
+
+    panel_dates = sorted(panel["date"].astype(str).unique())
+    latest_panel_date = panel_dates[-1]
+    if ANCHOR_SIGNAL not in panel_dates:
+        raise RuntimeError(f"anchor signal {ANCHOR_SIGNAL} missing from 2026 eligible panel")
+
+    anchor_idx = panel_dates.index(ANCHOR_SIGNAL)
+    scheduled = panel_dates[anchor_idx::HORIZON]
+    latest_signal = scheduled[-1]
+    execution_date = next_date_after(panel_dates, latest_signal)
+
+    day = panel[panel["date"].eq(latest_signal)].copy()
+    day["market_cap"] = pd.to_numeric(day["market_cap"], errors="coerce")
+    day = day[np.isfinite(day["market_cap"]) & (day["market_cap"] > 0)]
+    by_market = day.groupby("market_type")["market_cap"].sum()
+    kospi_cap = float(by_market.get("kospi", 0.0))
+    kosdaq_cap = float(by_market.get("kosdaq", 0.0))
+    total_cap = kospi_cap + kosdaq_cap
+    if total_cap <= 0:
+        raise RuntimeError("latest signal has no KOSPI/KOSDAQ market cap")
+    weights = {
+        "226490": kospi_cap / total_cap,
+        "229200": kosdaq_cap / total_cap,
+    }
+
+    price_date, prices = fetch_etf_closes(market_max)
+    order_rows = []
+    for capital in capitals:
+        order_rows.extend(target_holdings(capital, weights, prices, cfg.buy_cost))
+    orders = pd.DataFrame(order_rows)
+    orders.to_csv(out / "target_holdings.csv", index=False, encoding="utf-8-sig")
+
+    snapshot_cols = [c for c in ["date", "stock_code", "name", "sector", "market_type", "market_cap", "closing_price", "avg_value_20d", "equity"] if c in day.columns]
+    day[snapshot_cols].to_csv(out / "eligible_universe_latest_signal.csv", index=False, encoding="utf-8-sig")
+
+    market_fresh = market_stale_days <= MAX_MARKET_STALENESS_DAYS
+    financial_fresh = financial_stale_days <= MAX_FINANCIAL_STALENESS_DAYS
+    panel_reaches_market = latest_panel_date == market_max
+    live_ready = bool(market_fresh and financial_fresh and panel_reaches_market)
+
+    status = {
+        "strategy": "KODEX KOSPI + KODEX KOSDAQ150 dynamic eligible-market-cap split",
+        "anchor_signal": ANCHOR_SIGNAL,
+        "horizon_trading_days": HORIZON,
+        "db_market_max_date": market_max,
+        "latest_panel_date": latest_panel_date,
+        "latest_financial_available_date": fin_max,
+        "market_staleness_calendar_days": market_stale_days,
+        "financial_staleness_vs_market_days": financial_stale_days,
+        "latest_scheduled_signal": latest_signal,
+        "scheduled_signals_2026": scheduled,
+        "signal_execution_date": execution_date,
+        "etf_price_date": price_date,
+        "eligible_names": int(day["stock_code"].nunique()),
+        "kospi_eligible_market_cap": kospi_cap,
+        "kosdaq_eligible_market_cap": kosdaq_cap,
+        "target_weights": {"226490": weights["226490"], "229200": weights["229200"]},
+        "etf_prices": prices,
+        "market_fresh": market_fresh,
+        "financial_fresh": financial_fresh,
+        "panel_reaches_market_max": panel_reaches_market,
+        "LIVE_READY": live_ready,
+        "blocking_reason": None if live_ready else [
+            reason for cond, reason in [
+                (market_fresh, f"market data older than {MAX_MARKET_STALENESS_DAYS} calendar days"),
+                (financial_fresh, f"PIT financial data older than {MAX_FINANCIAL_STALENESS_DAYS} days vs market data"),
+                (panel_reaches_market, "eligible feature panel does not reach DB market max date"),
+            ] if not cond
+        ],
+        "note": "Target holdings are indicative baseline holdings, not submitted brokerage orders.",
+        "config": asdict(cfg),
+    }
+    (out / "live_status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(status, ensure_ascii=False, indent=2), flush=True)
+    print("\n=== Indicative target holdings ===", flush=True)
+    print(orders.to_string(index=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()
