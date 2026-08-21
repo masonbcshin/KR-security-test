@@ -1,9 +1,7 @@
 name: Personal-quant investable cap baseline
 
 on:
-  push:
-    branches:
-      - agent/marcap-tournament
+  pull_request:
     paths:
       - scripts/run_personal_quant_baseline.py
       - .github/workflows/personal-quant-baseline.yml
