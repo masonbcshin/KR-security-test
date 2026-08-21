@@ -1,10 +1,6 @@
 name: Personal-quant ETF live targets
 
 on:
-  pull_request:
-    paths:
-      - scripts/generate_personal_quant_etf_orders.py
-      - .github/workflows/personal-quant-live-targets.yml
   workflow_dispatch:
 
 permissions:
