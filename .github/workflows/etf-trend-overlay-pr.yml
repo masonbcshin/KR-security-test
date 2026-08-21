@@ -1,0 +1,119 @@
+name: ETF trend overlay PR research
+
+on:
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  trend-overlay:
+    if: github.event.pull_request.number == 2
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONUNBUFFERED: '1'
+      ACCEPTED_RUN_ID: '32492902475'
+      ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+    steps:
+      - name: Announce
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/issues/2/comments" --method POST \
+            -f body="Frozen ETF trend-overlay PR run started: \`${GITHUB_RUN_ID}\`, head \`${{ github.event.pull_request.head.sha }}\`."
+
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Guard frozen research constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/run_etf_trend_overlay.py').read_text(encoding='utf-8')
+          for x in ('PREREG_COMMENT_ID = 5376539768','SMA_MONTHS = 10','BOOTSTRAP_PATHS = 20_000','BOOTSTRAP_BLOCK = 21','BOOTSTRAP_SEED = 20260822','"sharpe_improvement_min": 0.10','"mdd_improvement_min": 0.05','"cagr_gap_min": -0.02','"pre2025_sharpe_improvement_min": 0.10'):
+              assert x in p, x
+          print('frozen_runner_guard=PASS')
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install finance-datareader==0.9.201
+
+      - name: Download immutable accepted artifact
+        run: |
+          set -euo pipefail
+          mkdir -p work/accepted
+          gh run download "$ACCEPTED_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ACCEPTED_ARTIFACT_NAME" --dir work/accepted
+          SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
+          test -n "$SIG"
+          echo "ACCEPTED_ARTIFACT_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
+
+      - name: Execute frozen challenger
+        id: research
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p outputs/etf_trend_overlay
+          python scripts/run_etf_trend_overlay.py \
+            --accepted-artifact-dir "$ACCEPTED_ARTIFACT_DIR" \
+            --test-start 20180101 --end 20260320 \
+            --output outputs/etf_trend_overlay 2>&1 | tee outputs/etf_trend_overlay/run.log
+
+      - name: Build result comment
+        if: always()
+        env:
+          RESEARCH_OUTCOME: ${{ steps.research.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path('outputs/etf_trend_overlay'); p=root/'result.json'
+          L=['## ETF 10M trend-overlay — frozen result','',f"- run: `{os.environ['GITHUB_RUN_ID']}`",f"- execution: **{os.environ.get('RESEARCH_OUTCOME')}**"]
+          if p.exists():
+              d=json.loads(p.read_text()); b=d['baseline']; c=d['challenger']; g=d['gate_values']; ck=d['gate_checks']
+              L += ['', '|Metric|84d baseline|10M trend|Delta|','|---|---:|---:|---:|',
+                    f"|CAGR|{b['cagr']:.3%}|{c['cagr']:.3%}|{c['cagr']-b['cagr']:+.3%}|",
+                    f"|Sharpe|{b['sharpe']:.3f}|{c['sharpe']:.3f}|{c['sharpe']-b['sharpe']:+.3f}|",
+                    f"|MDD|{b['max_drawdown']:.3%}|{c['max_drawdown']:.3%}|{c['max_drawdown']-b['max_drawdown']:+.3%}|",
+                    f"|Calmar|{b['calmar']:.3f}|{c['calmar']:.3f}|{c['calmar']-b['calmar']:+.3f}|",'', '### Preregistered gates']
+              for k in ('full_sharpe','mdd','calmar','cagr','pre2025_sharpe','subperiod_stability'): L.append(f"- {k}: **{'PASS' if ck[k] else 'FAIL'}**")
+              L += [f"- 2018-2024 Sharpe delta: **{g['pre2025_sharpe_improvement']:+.3f}**",f"- bad subperiods: **{g['bad_subperiod_count']}**",f"- mean strategic cash: **{d['mean_strategic_cash_weight']:.2%}**",f"- primary: **{'PASS' if d['primary_pass'] else 'FAIL'}**",f"- decision: **{d['decision']}**"]
+              if d.get('bootstrap'):
+                  x=d['bootstrap']; L += ['', '### Fixed paired bootstrap',f"- P(Sharpe better): **{x['p_challenger_sharpe_gt_baseline']:.2%}**",f"- P(CAGR better): **{x['p_challenger_cagr_gt_baseline']:.2%}**",f"- median Sharpe edge: **{x['median_sharpe_edge']:+.3f}**",f"- bootstrap: **{'PASS' if d.get('bootstrap_pass') else 'FAIL'}**"]
+          else:
+              L += ['', '- result.json: **missing**']; log=root/'run.log'
+              if log.exists(): L += ['```text',*log.read_text(errors='replace').splitlines()[-30:],'```']
+          Path('result-comment.md').write_text('\n'.join(L)+'\n')
+          print(Path('result-comment.md').read_text())
+          PY
+
+      - name: Comment result
+        if: always()
+        run: gh api "repos/${GITHUB_REPOSITORY}/issues/2/comments" --method POST -f body="$(cat result-comment.md)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-trend-overlay
+          path: outputs/etf_trend_overlay
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if execution failed
+        if: steps.research.outcome != 'success'
+        run: exit 1
