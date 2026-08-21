@@ -1,9 +1,6 @@
 name: ETF price source snapshot
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/etf-price-fetch.yml
   workflow_dispatch:
 
 permissions:
