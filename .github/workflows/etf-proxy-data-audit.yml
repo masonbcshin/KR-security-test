@@ -1,10 +1,6 @@
 name: ETF proxy data audit
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/etf-proxy-data-audit.yml
-      - scripts/audit_etf_proxy_data.py
   workflow_dispatch:
 
 permissions:
