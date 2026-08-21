@@ -1,9 +1,6 @@
 name: Personal-quant latest data audit
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/personal-quant-latest-data-audit.yml
   workflow_dispatch:
 
 permissions:
