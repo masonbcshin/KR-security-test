@@ -1,10 +1,6 @@
 name: ETF rebalance cadence robustness
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_etf_rebalance_robustness.py
-      - .github/workflows/etf-rebalance-robustness.yml
   workflow_dispatch:
 
 permissions:
