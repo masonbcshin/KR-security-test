@@ -22,7 +22,6 @@ jobs:
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
       ACCEPTED_RUN_ID: '32492902475'
       ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
-      DB_CACHE_KEY: kr-research-db-v4-e773d4243b7a644dd0c525daccebdf062bc389a1-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
     steps:
       - name: Announce
         run: |
@@ -101,7 +100,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: work/krx_stock_data.db
-          key: ${{ env.DB_CACHE_KEY }}
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
 
       - name: Report DB source
         run: echo "db_cache_hit=${{ steps.dbcache.outputs.cache-hit }}"
@@ -150,6 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           test -s work/krx_stock_data.db
+          mkdir -p outputs/gpa_single_factor
           python scripts/build_marcap_db_ci.py \
             --phase audit \
             --alphakrx-root vendor/alphakrx \
@@ -162,7 +162,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: work/krx_stock_data.db
-          key: ${{ env.DB_CACHE_KEY }}
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
 
       - name: Download immutable accepted ETF artifact
         shell: bash
