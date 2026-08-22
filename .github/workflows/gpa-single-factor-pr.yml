@@ -15,13 +15,14 @@ jobs:
   gpa-single-factor:
     if: github.event.pull_request.number == 5
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PYTHONUNBUFFERED: '1'
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
       ACCEPTED_RUN_ID: '32492902475'
       ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+      DB_CACHE_KEY: kr-research-db-v4-e773d4243b7a644dd0c525daccebdf062bc389a1-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
     steps:
       - name: Announce
         run: |
@@ -60,36 +61,108 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      - name: Install system and Python dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Checkout pinned AlphaKRX feature engine
+      - name: Checkout pinned AlphaKRX research engine
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p vendor
           git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx
           git -C vendor/alphakrx sparse-checkout init --cone
-          git -C vendor/alphakrx sparse-checkout set ml
+          git -C vendor/alphakrx sparse-checkout set etl ml data/raw_financial
           git -C vendor/alphakrx fetch --depth=1 origin "$ALPHAKRX_SHA"
           git -C vendor/alphakrx checkout --detach FETCH_HEAD
           test -f vendor/alphakrx/ml/features/_pipeline.py
+          test -f vendor/alphakrx/etl/financial_etl.py
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/build_marcap_db.py \
+            scripts/build_marcap_db_ci.py \
+            scripts/run_portable_tournament.py \
+            scripts/run_long_reversal_challenger.py \
+            scripts/run_gpa_single_factor.py
+
+      - name: Cache marcap yearly parquet
+        uses: actions/cache@v4
+        with:
+          path: .cache/marcap
+          key: marcap-${{ runner.os }}-2011-2026
 
       - name: Restore cached full research DB
         id: dbcache
         uses: actions/cache/restore@v4
         with:
           path: work/krx_stock_data.db
-          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+          key: ${{ env.DB_CACHE_KEY }}
 
-      - name: Require full DB cache hit
+      - name: Report DB source
+        run: echo "db_cache_hit=${{ steps.dbcache.outputs.cache-hit }}"
+
+      - name: Build full marcap price DB on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
+          mkdir -p outputs/gpa_single_factor work
+          python scripts/build_marcap_db_ci.py \
+            --phase prices \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_prices.log
+
+      - name: Load PIT financials on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase financial \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 \
+            --financial-start-year 2015 \
+            --financial-end-year 2025 | tee outputs/gpa_single_factor/db_financial.log
+
+      - name: Build adjusted prices on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase adjusted \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_adjusted.log
+
+      - name: Audit full research DB
+        shell: bash
+        run: |
+          set -euo pipefail
           test -s work/krx_stock_data.db
+          python scripts/build_marcap_db_ci.py \
+            --phase audit \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_audit.log
+
+      - name: Save rebuilt full research DB cache
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: work/krx_stock_data.db
+          key: ${{ env.DB_CACHE_KEY }}
 
       - name: Download immutable accepted ETF artifact
         shell: bash
@@ -100,13 +173,6 @@ jobs:
           SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
           test -n "$SIG"
           echo "ACCEPTED_ARTIFACT_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
-
-      - name: Syntax check
-        run: |
-          python -m py_compile \
-            scripts/run_portable_tournament.py \
-            scripts/run_long_reversal_challenger.py \
-            scripts/run_gpa_single_factor.py
 
       - name: Execute preregistered GPA challenger
         id: research
@@ -154,6 +220,9 @@ jobs:
           else:
               L += ['', '- result.json: **missing**']; log=root/'run.log'
               if log.exists(): L += ['```text',*log.read_text(errors='replace').splitlines()[-35:],'```']
+              for name in ('db_prices.log','db_financial.log','db_adjusted.log','db_audit.log'):
+                  q=root/name
+                  if q.exists(): L += ['',f'### {name} tail','```text',*q.read_text(errors='replace').splitlines()[-12:],'```']
           Path('result-comment.md').write_text('\n'.join(L)+'\n',encoding='utf-8')
           print(Path('result-comment.md').read_text())
           PY
