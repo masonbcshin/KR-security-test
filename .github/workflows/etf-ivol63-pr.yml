@@ -67,7 +67,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install 'FinanceDataReader==0.9.201'
+          pip install 'finance-datareader==0.9.201'
 
       - name: Syntax check
         run: |
