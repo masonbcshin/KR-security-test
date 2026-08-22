@@ -1,0 +1,179 @@
+name: ETF IVOL63 PR research
+
+on:
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  etf-ivol63:
+    if: github.event.pull_request.number == 12
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONUNBUFFERED: '1'
+      ACCEPTED_RUN_ID: '32492902475'
+      ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+    steps:
+      - name: Announce
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/issues/12/comments" --method POST \
+            -f body="Frozen ETF IVOL63 run started: \`${GITHUB_RUN_ID}\`, head \`${{ github.event.pull_request.head.sha }}\`."
+
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Guard preregistered constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/run_etf_ivol63.py').read_text(encoding='utf-8')
+          for token in (
+              'RESEARCH_ID = "RL-2026-08-22-ETF-IVOL63-001"',
+              'PREREG_COMMENT_ID = 5380794609',
+              'CODES = ["226490", "229200"]',
+              'VOL_LOOKBACK = 63',
+              'BOOTSTRAP_PATHS = 20_000',
+              'BOOTSTRAP_BLOCK = 21',
+              'BOOTSTRAP_SEED = 20260822',
+              '"full_sharpe_improvement_min": 0.10',
+              '"pre2025_sharpe_improvement_min": 0.10',
+              '"mdd_improvement_min": 0.05',
+              '"cagr_gap_min": -0.01',
+              '"max_transaction_cost_pct_initial": 0.05',
+              'returns.rolling(VOL_LOOKBACK, min_periods=VOL_LOOKBACK).std(ddof=1)',
+              'inv = 1.0 / sigma',
+              'weights = inv / inv.sum()',
+          ):
+              assert token in p, token
+          print('frozen_etf_ivol63_guard=PASS')
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/run_portable_tournament.py \
+            scripts/run_personal_quant_baseline.py \
+            scripts/run_etf_proxy_baseline.py \
+            scripts/run_etf_ivol63.py
+
+      - name: Download immutable accepted ETF artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/accepted
+          gh run download "$ACCEPTED_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ACCEPTED_ARTIFACT_NAME" \
+            --dir work/accepted
+          SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
+          test -n "$SIG"
+          echo "ACCEPTED_ARTIFACT_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
+
+      - name: Execute preregistered ETF IVOL63 challenger
+        id: research
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p outputs/etf_ivol63
+          python scripts/run_etf_ivol63.py \
+            --accepted-artifact-dir "$ACCEPTED_ARTIFACT_DIR" \
+            --test-start 20180101 \
+            --end 20260320 \
+            --output outputs/etf_ivol63 \
+            2>&1 | tee outputs/etf_ivol63/run.log
+
+      - name: Build result comment
+        if: always()
+        env:
+          RESEARCH_OUTCOME: ${{ steps.research.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('outputs/etf_ivol63')
+          p = root / 'result.json'
+          lines = [
+              '## ETF IVOL63 — frozen result', '',
+              f"- run: `{os.environ['GITHUB_RUN_ID']}`",
+              f"- execution: **{os.environ.get('RESEARCH_OUTCOME')}**",
+              '- preregistration: PR #1 comment `5380794609`',
+          ]
+          if p.exists():
+              d = json.loads(p.read_text(encoding='utf-8'))
+              b, c = d['baseline'], d['challenger']
+              v, ck, op = d['gate_values'], d['gate_checks'], d['operations']
+              lines += [
+                  '', '|Metric|Accepted 84d ETF|IVOL63|Delta|',
+                  '|---|---:|---:|---:|',
+                  f"|CAGR|{b['cagr']:.3%}|{c['cagr']:.3%}|{c['cagr']-b['cagr']:+.3%}|",
+                  f"|Sharpe|{b['sharpe']:.3f}|{c['sharpe']:.3f}|{c['sharpe']-b['sharpe']:+.3f}|",
+                  f"|MDD|{b['max_drawdown']:.3%}|{c['max_drawdown']:.3%}|{c['max_drawdown']-b['max_drawdown']:+.3%}|",
+                  f"|Calmar|{b['calmar']:.3f}|{c['calmar']:.3f}|{c['calmar']-b['calmar']:+.3f}|",
+                  '', '### Preregistered gates',
+              ]
+              for key in ('full_sharpe','pre2025_sharpe','mdd','calmar','cagr','subperiod_stability','cost'):
+                  lines.append(f"- {key}: **{'PASS' if ck[key] else 'FAIL'}**")
+              lines += [
+                  f"- 2018-2024 Sharpe delta: **{v['pre2025_sharpe_improvement']:+.3f}**",
+                  f"- MDD improvement: **{v['mdd_improvement']:+.3%}**",
+                  f"- bad subperiod count: **{v['bad_subperiod_count']}**",
+                  f"- transaction cost: **KRW {op['transaction_cost_krw']:,.0f}** ({op['transaction_cost_pct_initial']:.2%} of initial)",
+                  f"- gross turnover / initial capital: **{op['gross_turnover_multiple']:.2f}x**",
+                  f"- primary: **{'PASS' if d['primary_pass'] else 'FAIL'}**",
+                  f"- decision: **{d['decision']}**",
+              ]
+              if d.get('bootstrap'):
+                  x = d['bootstrap']
+                  lines += [
+                      '', '### Fixed paired bootstrap',
+                      f"- P(IVOL63 Sharpe > baseline): **{x['p_challenger_sharpe_gt_baseline']:.2%}**",
+                      f"- P(IVOL63 CAGR > baseline): **{x['p_challenger_cagr_gt_baseline']:.2%}**",
+                      f"- median Sharpe edge: **{x['median_sharpe_edge']:+.3f}**",
+                      f"- bootstrap: **{'PASS' if d.get('bootstrap_pass') else 'FAIL'}**",
+                  ]
+          else:
+              lines += ['', '- result.json: **missing**']
+              log = root / 'run.log'
+              if log.exists():
+                  lines += ['```text', *log.read_text(errors='replace').splitlines()[-50:], '```']
+          Path('result-comment.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          print(Path('result-comment.md').read_text())
+          PY
+
+      - name: Comment result
+        if: always()
+        run: gh api "repos/${GITHUB_REPOSITORY}/issues/12/comments" --method POST -f body="$(cat result-comment.md)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-ivol63
+          path: outputs/etf_ivol63
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail if execution failed
+        if: steps.research.outcome != 'success'
+        run: exit 1
