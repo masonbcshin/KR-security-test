@@ -5,6 +5,11 @@ on:
     branches: [agent/marcap-tournament]
     paths:
       - '.github/workflows/publish-research-db.yml'
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/research/publish-research-db-trigger.md'
   workflow_dispatch:
 
 permissions:
@@ -13,6 +18,7 @@ permissions:
 
 jobs:
   publish-research-db:
+    if: github.event_name != 'pull_request' || github.head_ref == 'infra/publish-research-db-run'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -21,8 +27,13 @@ jobs:
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
       ARTIFACT_NAME: kr-research-db-v4-2011-2026-2015-2025
     steps:
-      - name: Checkout publisher commit
+      - name: Checkout frozen publisher source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+
+      - name: Record source SHA
+        run: echo "PUBLISHER_SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
@@ -109,7 +120,7 @@ jobs:
           sha256sum work/krx_stock_data.db | tee outputs/research_db/krx_stock_data.db.sha256
           {
             echo "publisher_run_id=${GITHUB_RUN_ID}"
-            echo "publisher_head_sha=${GITHUB_SHA}"
+            echo "publisher_source_sha=${PUBLISHER_SOURCE_SHA}"
             echo "alphakrx_sha=${ALPHAKRX_SHA}"
             echo "price_years=2011-2026"
             echo "financial_years=2015-2025"
@@ -139,7 +150,7 @@ jobs:
           ### Immutable research DB published
 
           - run: \`${GITHUB_RUN_ID}\`
-          - publisher commit: \`${GITHUB_SHA}\`
+          - publisher source commit: \`${PUBLISHER_SOURCE_SHA}\`
           - pinned AlphaKRX: \`${ALPHAKRX_SHA}\`
           - artifact: \`${ARTIFACT_NAME}\`
           - DB SHA256: \`${DB_SHA}\`
