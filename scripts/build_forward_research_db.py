@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Build a point-in-time forward research DB with frozen methodology and dated data snapshots.
 
-This is infrastructure for RL-2026-08-22-ETF-FORWARD-001. It deliberately
-separates *methodology code* from *raw financial data*:
+Infrastructure for RL-2026-08-22-ETF-FORWARD-001.
 
-- ``--method-alphakrx-root`` must be the frozen audited AlphaKRX code checkout.
-- ``--data-alphakrx-root`` may be a newer checkout whose only role is supplying
-  ``data/raw_financial`` available at the forward signal date.
-- ``--marcap-sha`` pins FinanceData/marcap prices to an exact repository commit.
+Forward integrity rule: this builder is intentionally *not* a historical replay
+utility.  A valid signal-day snapshot must contain market data through exactly
+the requested signal date and must contain no financial record whose
+``available_date`` is later than that signal date.  If a later data snapshot is
+used to reconstruct an old signal, the build fails instead of deleting future
+rows and manufacturing a pseudo-PIT history.
+
+Method and data are versioned separately:
+- ``--method-alphakrx-root`` is the frozen audited AlphaKRX methodology checkout.
+- ``--data-alphakrx-root`` supplies the raw financial ZIP snapshot available on
+  the forward signal date.
+- ``--marcap-sha`` pins FinanceData/marcap to an exact repository commit.
 
 No strategy score or return is calculated here.
 """
@@ -44,7 +51,7 @@ def parse_args():
     p.add_argument("--method-alphakrx-sha", default=METHOD_ALPHAKRX_SHA)
     p.add_argument("--data-alphakrx-sha", required=True)
     p.add_argument("--marcap-sha", required=True)
-    p.add_argument("--signal-date", required=True, help="YYYYMMDD; snapshot may not contain later prices")
+    p.add_argument("--signal-date", required=True, help="YYYYMMDD; must equal the market snapshot max date")
     p.add_argument("--db", required=True)
     p.add_argument("--start-year", type=int, default=2011)
     p.add_argument("--financial-start-year", type=int, default=2015)
@@ -61,7 +68,7 @@ def _financial_year(path: Path):
 
 
 def load_financials(method_root: Path, data_root: Path, db: Path, start_year: int, end_year: int):
-    """Run the frozen AlphaKRX ETL code against a separately versioned raw-data tree."""
+    """Run frozen AlphaKRX ETL code against a separately versioned raw-data tree."""
     sys.path.insert(0, str(method_root))
     from etl.financial_etl import FinancialDataLoader
 
@@ -122,16 +129,21 @@ def load_financials(method_root: Path, data_root: Path, db: Path, start_year: in
     return stats
 
 
-def truncate_price_snapshot(db: Path, signal_date: str):
-    """Hard guard against a later marcap snapshot leaking post-signal prices."""
+def price_snapshot_status(db: Path, signal_date: str):
+    """Require a genuine same-day market snapshot; never trim a later snapshot."""
     with sqlite3.connect(db) as con:
-        con.execute("DELETE FROM daily_prices WHERE date > ?", (signal_date,))
-        con.commit()
-        max_date = con.execute("SELECT MAX(date) FROM daily_prices").fetchone()[0]
-        rows = con.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
-    if max_date is None or max_date > signal_date:
-        raise RuntimeError(f"price snapshot truncation failed: max_date={max_date} signal={signal_date}")
-    return {"daily_rows_after_truncate": int(rows), "max_price_date": str(max_date)}
+        min_date, max_date, rows = con.execute(
+            "SELECT MIN(date), MAX(date), COUNT(*) FROM daily_prices"
+        ).fetchone()
+    if max_date is None:
+        raise RuntimeError("empty market snapshot")
+    if str(max_date) != signal_date:
+        direction = "future/backfilled" if str(max_date) > signal_date else "stale/incomplete"
+        raise RuntimeError(
+            f"market snapshot is {direction}: max_date={max_date}, required={signal_date}; "
+            "forward signals must not be reconstructed from a later snapshot"
+        )
+    return {"daily_rows": int(rows), "min_price_date": str(min_date), "max_price_date": str(max_date)}
 
 
 def sha256_file(path: Path):
@@ -146,6 +158,18 @@ def max_financial_availability(db: Path):
     with sqlite3.connect(db) as con:
         row = con.execute("SELECT MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone()
     return None if not row or row[0] is None else str(row[0])
+
+
+def guard_financial_snapshot(db: Path, signal_date: str):
+    max_available = max_financial_availability(db)
+    if max_available is None:
+        raise RuntimeError("financial snapshot contains no available_date")
+    if max_available > signal_date:
+        raise RuntimeError(
+            f"future financial availability detected: max_available={max_available}, signal={signal_date}; "
+            "do not use a later raw-data snapshot to recreate an old forward signal"
+        )
+    return max_available
 
 
 def main():
@@ -166,12 +190,12 @@ def main():
     end_year = int(a.signal_date[:4])
     cache = Path(a.cache_dir).resolve()
 
-    # Pin the raw GitHub URL to the run-time FinanceData/marcap commit.
+    # Pin market data to the run-time FinanceData/marcap commit.
     build.MARCAP_RAW = f"https://raw.githubusercontent.com/FinanceData/marcap/{a.marcap_sha}/data/marcap-{{year}}.parquet"
 
     print(f"[forward-db] build prices {a.start_year}..{end_year} @ marcap {a.marcap_sha}", flush=True)
     build.build_prices(db, cache, a.start_year, end_year)
-    trunc = truncate_price_snapshot(db, a.signal_date)
+    price_status = price_snapshot_status(db, a.signal_date)
 
     print(
         f"[forward-db] load PIT financials {a.financial_start_year}..{end_year} "
@@ -179,12 +203,13 @@ def main():
         flush=True,
     )
     fin = load_financials(method_root, data_root, db, a.financial_start_year, end_year)
+    max_fin_available = guard_financial_snapshot(db, a.signal_date)
 
     print("[forward-db] build adjusted prices with frozen method code", flush=True)
     build.build_adjusted_prices(method_root, db)
     audit = build.audit(db)
-    if str(audit["date_max"]) > a.signal_date:
-        raise RuntimeError(f"audit detected post-signal price date: {audit['date_max']}")
+    if str(audit["date_max"]) != a.signal_date:
+        raise RuntimeError(f"post-adjustment date drift: {audit['date_max']} != {a.signal_date}")
 
     db_sha = sha256_file(db)
     manifest = {
@@ -196,10 +221,11 @@ def main():
         "db_sha256": db_sha,
         "db_bytes": db.stat().st_size,
         "max_price_date": audit["date_max"],
-        "max_financial_available_date": max_financial_availability(db),
-        "price_snapshot": trunc,
+        "max_financial_available_date": max_fin_available,
+        "price_snapshot": price_status,
         "financial_etl": fin,
         "audit": audit,
+        "replay_policy": "same-day snapshot only; future/stale market data or future financial availability => FAIL",
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, ensure_ascii=False, indent=2), flush=True)
