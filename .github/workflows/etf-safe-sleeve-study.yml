@@ -80,3 +80,5 @@ jobs:
           path: outputs/etf_safe_sleeve
           if-no-files-found: error
           retention-days: 14
+
+# retrigger after workflow registration
