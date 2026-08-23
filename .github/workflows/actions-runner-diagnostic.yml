@@ -1,0 +1,20 @@
+name: Actions runner diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/actions-runner-diagnostic.yml
+  workflow_dispatch:
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runner alive
+        run: |
+          echo "runner_started=true"
+          uname -a
+          python3 --version
