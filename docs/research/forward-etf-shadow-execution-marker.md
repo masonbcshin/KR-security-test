@@ -4,4 +4,5 @@ No research logic is defined here. This file only triggers the base-branch PR ch
 
 - preregistration: PR #1 comment `5380855734`
 - implementation freeze: PR #1 comment `5380875031`
+- checker revision: wrapper + accepted-schedule proof
 - strategy/gate/cost/data-source rule change: none
