@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Authoritative entrypoint for RL-2026-08-22-ETF-FORWARD-001.
 
-This wrapper adds two operational guards that were already established by the
-accepted production calculator, without changing either strategy:
+This wrapper adds operational guards without changing either frozen strategy:
 
 1. continue the accepted 84-session schedule from the immutable artifact's last
    verified signal (2025-11-17), while retaining the original 2018-01-02
-   research anchor in output metadata; and
+   research anchor in strategy metadata;
 2. reject forward signal freezing when PIT financial availability is more than
-   180 calendar days stale versus the signal-day market snapshot.
+   180 calendar days stale versus the signal-day market snapshot; and
+3. persist the schedule/data/implementation preflight provenance before the
+   strategy engine emits a forward signal primitive.
 
 Using the accepted last signal as a continuation anchor is mathematically the
 same 84-session sequence as rebuilding the entire 2018-present trading calendar,
@@ -19,7 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +36,6 @@ SCHEDULE_PROOF = Path("data/accepted_84d_control_schedule.json")
 EXPECTED_DATES_SHA256 = "dc5c6a140550a663f9349e27ead727ab0f3e6f5121e008a4b45c4c69223b15e4"
 ORIGINAL_ANCHOR = "20180102"
 CONTINUATION_ANCHOR = "20251117"
-HISTORICAL_TEST_END = "20260320"
 CADENCE = 84
 MAX_FINANCIAL_STALENESS_DAYS = 180
 
@@ -53,6 +55,11 @@ def _dates_digest(dates: list[str]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _canonical_hash(obj: dict) -> str:
+    raw = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def validate_schedule_proof(path: Path = SCHEDULE_PROOF):
     proof = json.loads(path.read_text(encoding="utf-8"))
     dates = [str(x) for x in proof.get("signal_dates") or []]
@@ -69,6 +76,28 @@ def validate_schedule_proof(path: Path = SCHEDULE_PROOF):
     if not all(checks.values()):
         raise RuntimeError(f"accepted 84d schedule proof drift: {checks}")
     return proof
+
+
+def validate_implementation_sha(value: str | None):
+    if not value or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        raise RuntimeError(
+            "--implementation-sha must be the exact 40-hex commit checked out for this forward run"
+        )
+    value = value.lower()
+
+    # In the intended GitHub execution path this is a detached checkout of the
+    # frozen implementation.  Manual/exported environments may not have .git;
+    # they still must provide an exact-looking SHA, but cannot claim the local
+    # checkout comparison below.
+    try:
+        actual = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip().lower()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        actual = None
+    if actual and actual != value:
+        raise RuntimeError(f"implementation checkout drift: git HEAD {actual} != supplied {value}")
+    return value, actual
 
 
 def continuation_trading_dates(db: Path, end_date: str):
@@ -92,8 +121,14 @@ def continuation_trading_dates(db: Path, end_date: str):
     return dates
 
 
-def preflight(db: Path, signal_date: str, manifest_path: Path):
+def preflight(
+    db: Path,
+    signal_date: str,
+    manifest_path: Path,
+    implementation_sha: str,
+):
     proof = validate_schedule_proof()
+    proof_file_sha = hashlib.sha256(SCHEDULE_PROOF.read_bytes()).hexdigest()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("research_id") != RESEARCH_ID:
         raise RuntimeError(f"manifest RL-ID drift: {manifest.get('research_id')}")
@@ -134,20 +169,43 @@ def preflight(db: Path, signal_date: str, manifest_path: Path):
     result = {
         "research_id": RESEARCH_ID,
         "signal_date": signal_date,
+        "implementation_sha": implementation_sha,
+        "accepted_schedule_proof_file_sha256": proof_file_sha,
+        "accepted_schedule_dates_sha256": EXPECTED_DATES_SHA256,
         "accepted_schedule_source_run": proof.get("source_run_id"),
         "accepted_schedule_source_artifact": proof.get("source_artifact_id"),
+        "accepted_schedule_source_artifact_digest": proof.get("source_artifact_digest"),
+        "accepted_schedule_source_member_sha256": proof.get("source_member_sha256"),
         "original_anchor": ORIGINAL_ANCHOR,
         "continuation_anchor": CONTINUATION_ANCHOR,
         "cadence_sessions": CADENCE,
+        "db_sha256": manifest.get("db_sha256"),
+        "method_alphakrx_sha": manifest.get("method_alphakrx_sha"),
+        "data_alphakrx_sha": manifest.get("data_alphakrx_sha"),
+        "marcap_sha": manifest.get("marcap_sha"),
+        "market_max_date": market_max,
         "financial_available_date": fin_max,
         "financial_staleness_calendar_days": age,
         "first_post_freeze_control_seen": first_forward,
         "control_due": control_due,
         "schedule_tail": schedule[-5:],
     }
+    result["canonical_payload_sha256"] = _canonical_hash(result)
     print("forward_shadow_preflight=PASS")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
+
+
+def persist_preflight(out: Path, signal_date: str, result: dict):
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"preflight_{signal_date}.json"
+    text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    path.write_text(text, encoding="utf-8")
+    file_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    (out / f"preflight_{signal_date}.sha256").write_text(
+        f"{file_sha}  {path.name}\n", encoding="utf-8"
+    )
+    return path, file_sha
 
 
 def main():
@@ -166,10 +224,23 @@ def main():
     db_arg = _arg_value("--db")
     signal_date = _arg_value("--signal-date")
     manifest_arg = _arg_value("--snapshot-manifest")
+    implementation_arg = _arg_value("--implementation-sha")
+    output_arg = _arg_value("--output") or "outputs/forward_etf_shadow"
     if not db_arg or not signal_date or not manifest_arg:
         raise ValueError("--db, --signal-date and --snapshot-manifest are required")
 
-    preflight(Path(db_arg).resolve(), signal_date, Path(manifest_arg).resolve())
+    implementation_sha, _ = validate_implementation_sha(implementation_arg)
+    result = preflight(
+        Path(db_arg).resolve(),
+        signal_date,
+        Path(manifest_arg).resolve(),
+        implementation_sha,
+    )
+    path, file_sha = persist_preflight(Path(output_arg).resolve(), signal_date, result)
+    print(f"forward_preflight_artifact={path} sha256={file_sha}")
+
+    # Strategy engine executes only after the immutable schedule/data/code
+    # provenance has been persisted successfully.
     engine.main()
 
 
