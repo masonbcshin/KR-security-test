@@ -4,9 +4,9 @@
 Infrastructure for RL-2026-08-22-ETF-FORWARD-001.
 
 Forward integrity rule: this builder is intentionally *not* a historical replay
-utility.  A valid signal-day snapshot must contain market data through exactly
+utility. A valid signal-day snapshot must contain market data through exactly
 the requested signal date and must contain no financial record whose
-``available_date`` is later than that signal date.  If a later data snapshot is
+``available_date`` is later than that signal date. If a later data snapshot is
 used to reconstruct an old signal, the build fails instead of deleting future
 rows and manufacturing a pseudo-PIT history.
 
@@ -188,7 +188,10 @@ def main():
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     end_year = int(a.signal_date[:4])
-    cache = Path(a.cache_dir).resolve()
+    # Cache is namespaced by the exact market-data commit. Reusing a yearly
+    # parquet from an older marcap commit would silently make a later forward
+    # signal stale even though --marcap-sha changed.
+    cache = (Path(a.cache_dir).resolve() / a.marcap_sha)
 
     # Pin market data to the run-time FinanceData/marcap commit.
     build.MARCAP_RAW = f"https://raw.githubusercontent.com/FinanceData/marcap/{a.marcap_sha}/data/marcap-{{year}}.parquet"
@@ -218,6 +221,7 @@ def main():
         "method_alphakrx_sha": a.method_alphakrx_sha,
         "data_alphakrx_sha": a.data_alphakrx_sha,
         "marcap_sha": a.marcap_sha,
+        "marcap_cache_namespace": str(cache),
         "db_sha256": db_sha,
         "db_bytes": db.stat().st_size,
         "max_price_date": audit["date_max"],
