@@ -42,7 +42,21 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           p=Path('scripts/run_etf_safe_sleeve_study.py').read_text(encoding='utf-8')
-          for x in ('PREREG_COMMENT_ID = 5383435992','EQUITY_EXPOSURE = 0.60','SAFE_EXPOSURE = 0.40','"214980"','"273140"','"423160"','"459580"'):
+          for x in (
+              'PREREG_COMMENT_ID = 5383435992',
+              'DISTRIBUTION_AMENDMENT_COMMENT_ID = 5383468340',
+              'AFTER_TAX_SELECTION_COMMENT_ID = 5383469585',
+              'HISTORICAL_DISTRIBUTION_CORRECTION_COMMENT_ID = 5383492708',
+              'EQUITY_EXPOSURE = 0.60',
+              'SAFE_EXPOSURE = 0.40',
+              'TAX_RATE = 0.154',
+              '"214980"', '"273140"', '"423160"', '"459580"',
+              '"20181227": 1785.0',
+              '"20181227": 1640.0',
+              '"20260114": 251.0',
+              '"20260114": 246.0',
+              '"conservative_after_tax"',
+          ):
               assert x in p, x
           print('frozen_guard=PASS')
           PY
