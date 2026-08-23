@@ -7,8 +7,9 @@ Frozen full-history candidates (PR #1 comment 5383435992):
 - KODEX 단기변동금리부채권액티브 (273140)
 
 Methodology amendments were locked before any candidate result was observed:
-- comment 5383468340: reconstruct disclosed monthly distributions from Aug-2025
+- comment 5383468340: reconstruct disclosed distributions
 - comment 5383469585: full-history selection uses a conservative after-tax version
+- comment 5383492708: add the official 2018 year-end distributions discovered in source audit
 
 The safe ETF is an actual third instrument, whole-share only, reset to 40% only on
 accepted 84-trading-day refreshes. Distributions accumulate as cash until the next
@@ -33,6 +34,7 @@ import FinanceDataReader as fdr
 PREREG_COMMENT_ID = 5383435992
 DISTRIBUTION_AMENDMENT_COMMENT_ID = 5383468340
 AFTER_TAX_SELECTION_COMMENT_ID = 5383469585
+HISTORICAL_DISTRIBUTION_CORRECTION_COMMENT_ID = 5383492708
 TEST_START = "20180101"
 TEST_END = "20260320"
 INITIAL_CAPITAL = 100_000_000.0
@@ -51,11 +53,13 @@ DIAGNOSTIC_ONLY = {
     "459580": "KODEX CD금리액티브",
 }
 
-# Official disclosed per-share distributions.  Both funds had 0% annual
-# distributions in the official 2022-2024 history and changed to monthly
-# distributions from Aug-2025.  Dates below are ex-distribution dates.
+# Official disclosed per-share distributions inside the frozen 2018-2026 test.
+# Both funds paid an annual year-end distribution in 2018, then official later
+# histories show no distribution events during 2019-2024.  Monthly distributions
+# began from the Aug-2025 cycle. Dates below are ex-distribution trading dates.
 DISTRIBUTIONS = {
     "214980": {
+        "20181227": 1785.0,
         "20250813": 244.0,
         "20250912": 236.0,
         "20251014": 232.0,
@@ -66,6 +70,7 @@ DISTRIBUTIONS = {
         "20260312": 239.0,
     },
     "273140": {
+        "20181227": 1640.0,
         "20250813": 238.0,
         "20250912": 227.0,
         "20251014": 228.0,
@@ -549,9 +554,10 @@ def main():
         "prereg_comment_id": PREREG_COMMENT_ID,
         "distribution_amendment_comment_id": DISTRIBUTION_AMENDMENT_COMMENT_ID,
         "after_tax_selection_comment_id": AFTER_TAX_SELECTION_COMMENT_ID,
+        "historical_distribution_correction_comment_id": HISTORICAL_DISTRIBUTION_CORRECTION_COMMENT_ID,
         "selected_full_history": selected,
         "selection_uses": "conservative_after_tax",
-        "distribution_accounting": "Official disclosed per-share distributions Aug-2025 through 2026-03-20; cash retained until scheduled rebalance.",
+        "distribution_accounting": "Official disclosed per-share distributions inside the frozen window: 2018 year-end, no events 2019-2024, monthly Aug-2025 through 2026-03-20; cash retained until scheduled rebalance.",
         "tax_limitation": "15.4% applied to distributions and every positive realised safe-sleeve market-price gain. Actual Korean ETF sale tax is based on min(market gain, standard-tax-base increase), so this can overstate tax.",
         "diagnostic_limitation": "423160/459580 lack full history and are price-only diagnostics; they cannot affect selection.",
         "comparison": df.to_dict("records"),
