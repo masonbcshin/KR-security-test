@@ -1,0 +1,82 @@
+name: ETF safe-sleeve implementation study
+
+on:
+  push:
+    branches: [agent/marcap-tournament]
+    paths:
+      - scripts/run_etf_safe_sleeve_study.py
+      - .github/workflows/etf-safe-sleeve-study.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  safe-sleeve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ACCEPTED_RUN_ID: '32492902475'
+      ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+      RISK_RUN_ID: '32541276654'
+      RISK_ARTIFACT_NAME: 'kr-etf-fixed-risk-budget'
+      PYTHONUNBUFFERED: '1'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy finance-datareader==0.9.201
+
+      - name: Guard preregistration constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/run_etf_safe_sleeve_study.py').read_text(encoding='utf-8')
+          for x in ('PREREG_COMMENT_ID = 5383435992','EQUITY_EXPOSURE = 0.60','SAFE_EXPOSURE = 0.40','"214980"','"273140"','"423160"','"459580"'):
+              assert x in p, x
+          print('frozen_guard=PASS')
+          PY
+
+      - name: Download immutable accepted artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p work/accepted work/risk
+          gh run download "$ACCEPTED_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ACCEPTED_ARTIFACT_NAME" --dir work/accepted
+          gh run download "$RISK_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$RISK_ARTIFACT_NAME" --dir work/risk
+          SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
+          CMP="$(find work/risk -type f -name comparison.csv -print -quit)"
+          test -n "$SIG"; test -n "$CMP"
+          echo "ACCEPTED_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
+          echo "RISK_DIR=$(dirname "$CMP")" >> "$GITHUB_ENV"
+
+      - name: Execute frozen study
+        run: |
+          mkdir -p outputs/etf_safe_sleeve
+          python scripts/run_etf_safe_sleeve_study.py \
+            --accepted-artifact-dir "$ACCEPTED_DIR" \
+            --risk-budget-artifact-dir "$RISK_DIR" \
+            --output outputs/etf_safe_sleeve | tee outputs/etf_safe_sleeve/run.log
+
+      - name: Print comparison
+        if: always()
+        run: |
+          if [[ -f outputs/etf_safe_sleeve/comparison.csv ]]; then
+            cat outputs/etf_safe_sleeve/comparison.csv
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-safe-sleeve-study
+          path: outputs/etf_safe_sleeve
+          if-no-files-found: error
+          retention-days: 14
