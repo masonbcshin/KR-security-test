@@ -33,20 +33,27 @@ jobs:
         run: |
           python -m py_compile \
             scripts/build_forward_research_db.py \
-            scripts/generate_forward_etf_shadow_signal.py
+            scripts/generate_forward_etf_shadow_signal.py \
+            scripts/run_forward_etf_shadow.py
 
       - name: Frozen pure self-test
         run: |
-          python scripts/generate_forward_etf_shadow_signal.py \
+          python scripts/run_forward_etf_shadow.py \
             --self-test \
             --calendar data/krx_market_calendar_2025_2029.json
 
-      - name: Guard forward constants
+      - name: Guard forward constants and schedule proof
         run: |
           python - <<'PY'
+          import hashlib
+          import json
           from pathlib import Path
+
           p = Path('scripts/generate_forward_etf_shadow_signal.py').read_text(encoding='utf-8')
           b = Path('scripts/build_forward_research_db.py').read_text(encoding='utf-8')
+          w = Path('scripts/run_forward_etf_shadow.py').read_text(encoding='utf-8')
+          proof = json.loads(Path('data/accepted_84d_control_schedule.json').read_text(encoding='utf-8'))
+
           for token in (
               'RESEARCH_ID = "RL-2026-08-22-ETF-FORWARD-001"',
               'FREEZE_DATE = "20260822"',
@@ -61,11 +68,31 @@ jobs:
               'renormalize_remaining_on_sleeve": False',
           ):
               assert token in p, token
+
           for token in (
               'METHOD_ALPHAKRX_SHA = "e773d4243b7a644dd0c525daccebdf062bc389a1"',
               'forward signals must not be reconstructed from a later snapshot',
               'future financial availability detected',
+              '/ a.marcap_sha',
           ):
               assert token in b, token
+
+          for token in (
+              'ORIGINAL_ANCHOR = "20180102"',
+              'CONTINUATION_ANCHOR = "20251117"',
+              'CADENCE = 84',
+              'MAX_FINANCIAL_STALENESS_DAYS = 180',
+              'engine.actual_trading_dates = continuation_trading_dates',
+          ):
+              assert token in w, token
+
+          dates = [str(x) for x in proof['signal_dates']]
+          digest = hashlib.sha256(('\n'.join(dates) + '\n').encode()).hexdigest()
+          assert len(dates) == 24
+          assert dates[0] == '20180102'
+          assert dates[-1] == '20251117'
+          assert proof['cadence_trading_sessions'] == 84
+          assert digest == 'dc5c6a140550a663f9349e27ead727ab0f3e6f5121e008a4b45c4c69223b15e4'
+          assert proof['unique_signal_dates_sha256'] == digest
           print('forward_frozen_guard=PASS')
           PY
