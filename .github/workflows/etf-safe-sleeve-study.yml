@@ -1,8 +1,9 @@
 name: ETF safe-sleeve implementation study
 
 on:
-  push:
-    branches: [agent/marcap-tournament]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
     paths:
       - scripts/run_etf_safe_sleeve_study.py
       - .github/workflows/etf-safe-sleeve-study.yml
@@ -14,6 +15,7 @@ permissions:
 
 jobs:
   safe-sleeve:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -80,5 +82,3 @@ jobs:
           path: outputs/etf_safe_sleeve
           if-no-files-found: error
           retention-days: 14
-
-# retrigger after workflow registration
