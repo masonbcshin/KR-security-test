@@ -1,0 +1,71 @@
+name: Forward ETF shadow PR check
+
+on:
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  forward-shadow-check:
+    if: github.event.pull_request.number == 19
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install 'finance-datareader==0.9.201'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/build_forward_research_db.py \
+            scripts/generate_forward_etf_shadow_signal.py
+
+      - name: Frozen pure self-test
+        run: |
+          python scripts/generate_forward_etf_shadow_signal.py \
+            --self-test \
+            --calendar data/krx_market_calendar_2025_2029.json
+
+      - name: Guard forward constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/generate_forward_etf_shadow_signal.py').read_text(encoding='utf-8')
+          b = Path('scripts/build_forward_research_db.py').read_text(encoding='utf-8')
+          for token in (
+              'RESEARCH_ID = "RL-2026-08-22-ETF-FORWARD-001"',
+              'FREEZE_DATE = "20260822"',
+              'ANCHOR_DATE = "20180102"',
+              'CADENCE = 84',
+              'TARGET_HORIZON = 42',
+              'CODES = ["226490", "229200"]',
+              'SMA_MONTHS = 10',
+              'BUY_COST = 0.0035',
+              'SELL_COST = 0.0055',
+              'rolling(SMA_MONTHS, min_periods=SMA_MONTHS).mean()',
+              'renormalize_remaining_on_sleeve": False',
+          ):
+              assert token in p, token
+          for token in (
+              'METHOD_ALPHAKRX_SHA = "e773d4243b7a644dd0c525daccebdf062bc389a1"',
+              'forward signals must not be reconstructed from a later snapshot',
+              'future financial availability detected',
+          ):
+              assert token in b, token
+          print('forward_frozen_guard=PASS')
+          PY
