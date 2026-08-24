@@ -1,16 +1,30 @@
-# ETF Safe-Sleeve Implementation Verdict — PENDING_EXECUTION_INFRA
+# ETF Safe-Sleeve Implementation Verdict — FINAL
 
-## Current status
+## Decision
 
-The personal-quant Core remains:
+The accepted personal-quant Core is now:
 
-> **60% equity / 40% defensive risk budget, with the equity sleeve implemented by the accepted KODEX KOSPI (226490) + KODEX KOSDAQ150 (229200) dynamic eligible-market-cap split and refreshed every 84 trading days, T+1.**
+> **60% equity / 40% defensive sleeve**
+>
+> Equity sleeve: KODEX KOSPI (226490) + KODEX KOSDAQ150 (229200), dynamic eligible-market-cap split, refreshed every 84 trading days, T+1.
+>
+> Defensive sleeve: **KODEX 단기채권PLUS (214980)**, reset to 40% only on the same 84-trading-day refreshes.
 
-The 60/40 risk-budget selection is already accepted. This document concerns only the implementation of the 40% defensive sleeve.
+Status code: `FINAL_SELECTED_214980`.
 
-**No defensive-ETF candidate has been promoted yet.** Until the frozen implementation study executes successfully, the authoritative historical baseline remains **40% zero-yield cash**.
+## Authoritative execution
 
-Status code: `PENDING_EXECUTION_INFRA`.
+The previously blocked frozen study was rerun after the repository was made public, which restored GitHub-hosted runner allocation.
+
+- workflow run: `32632491941`
+- job: `97335047443`
+- conclusion: `success`
+- artifact: `kr-etf-safe-sleeve-study`
+- artifact id: `9508488280`
+- artifact digest: `sha256:a7cb99a0abedb0186aea12438acf20dd56c988d13d54baa27d2d2ad08aa679cf`
+- run head: `accdca6a703c3dfddeb084ce2466816e8656901d`
+
+The baseline-reproduction guard, preregistration guard, immutable-artifact download, frozen study, and artifact upload all passed.
 
 ## Frozen full-history candidates
 
@@ -20,112 +34,58 @@ Pre-registration: PR #1 comment `5383435992`.
 2. `214980` — KODEX 단기채권PLUS
 3. `273140` — KODEX 단기변동금리부채권액티브
 
-Current KOFR/CD ETFs are not eligible to win the 2018-2026 historical selection because they were listed after the test began:
+KOFR/CD ETFs remained post-inception diagnostics only and were not eligible to win the 2018-2026 selection.
 
-- `423160` KODEX KOFR금리액티브 — post-inception operational diagnostic only
-- `459580` KODEX CD금리액티브 — post-inception operational diagnostic only
+## Conservative after-tax authoritative results
 
-No synthetic pre-inception backfill is permitted.
+| Candidate | CAGR | Sharpe | MDD | Calmar | Worst 5y total return | End equity | Frozen gates |
+|---|---:|---:|---:|---:|---:|---:|---|
+| cash_zero | 7.7500% | 0.672565 | -27.2211% | 0.284706 | -0.1808% | KRW 184.575m | baseline |
+| **214980** | **8.6221%** | **0.738776** | **-25.6397%** | **0.336279** | **+3.2116%** | **KRW 197.205m** | **PASS all / SELECTED** |
+| 273140 | 8.6101% | 0.738112 | -25.8092% | 0.333607 | +3.2039% | KRW 197.027m | PASS all |
 
-## Frozen equity/risk-budget mechanics
+Both defensive ETFs passed every frozen promotion gate. The pre-registered tie-break then selected `214980` because it had the lower MDD, with slightly higher Sharpe and Calmar as well.
 
-- equity exposure: 60%
-- defensive exposure: 40%
-- exact accepted 226490/229200 relative weights
-- 84-trading-day refresh
-- T+1 target changes
-- no daily rebalancing
-- no leverage, trend timing, vol targeting, stop loss, or exposure retuning
-- conservative modeled transaction cost: buy 0.35%, sell 0.55%
-- defensive ETF: actual third instrument, whole shares; residual cash remains cash
+## Improvement vs zero-yield 60/40 baseline
 
-The runner must first reproduce the accepted 60/40 zero-yield baseline within `1e-10` for CAGR, Sharpe, MDD and Calmar. If this guard fails, the implementation study is invalid.
+Using the deliberately conservative taxable model:
 
-## Distribution-accounting corrections locked before results
+- CAGR: 7.75% -> **8.62%**
+- Sharpe: 0.673 -> **0.739**
+- MDD: -27.22% -> **-25.64%**
+- Calmar: 0.285 -> **0.336**
+- worst five-year total return: -0.18% -> **+3.21%**
+- end equity on KRW 100m: 184.575m -> **197.205m**
 
-The original price-only plan was superseded before any candidate result was observed because market close returns exclude ETF distributions.
+The model charged 15.4% on disclosed distributions and also 15.4% on every positive realized defensive-sleeve market-price gain. This can overstate actual Korean ETF holding-period tax, so the selected result is intentionally conservative.
 
-PR #1 methodology amendments:
+For 214980 the modeled tax was:
 
-- `5383468340` — add disclosed distributions to the defensive-sleeve cash flows
-- `5383469585` — selection uses the conservative after-tax reconstruction
-- `5383492708` — add the historical 2018 year-end distributions discovered during source audit
+- distribution gross: KRW 1,708,158
+- distribution tax: KRW 263,056
+- modeled realized-gain tax: KRW 1,175,693
+- total modeled tax: KRW 1,438,749
 
-Frozen disclosed distributions inside the test window:
+## Distribution accounting
 
-### 214980
+Methodology corrections were locked before any candidate result was observed:
 
-- 2018-12-27: KRW 1,785/share
-- 2025-08-13: 244
-- 2025-09-12: 236
-- 2025-10-14: 232
-- 2025-11-13: 238
-- 2025-12-12: 236
-- 2026-01-14: 251
-- 2026-02-12: 258
-- 2026-03-12: 239
+- `5383468340` — disclosed distributions added to cash flow
+- `5383469585` — conservative after-tax row used for selection
+- `5383492708` — historical 2018 year-end distributions added
 
-### 273140
+Distribution cash is held until the next scheduled 84-day refresh rather than immediately reinvested.
 
-- 2018-12-27: KRW 1,640/share
-- 2025-08-13: 238
-- 2025-09-12: 227
-- 2025-10-14: 228
-- 2025-11-13: 233
-- 2025-12-12: 232
-- 2026-01-14: 246
-- 2026-02-12: 238
-- 2026-03-12: 228
+## Final personal-quant baseline
 
-Official later histories indicate no distribution events in 2019-2024. Distribution cash is retained until the next scheduled 84-day refresh rather than immediately reinvested.
+The current tested implementation baseline is therefore:
 
-## Conservative taxable selection
+> **60% equity / 40% KODEX 단기채권PLUS (214980)**
+>
+> Equity 60% = 226490 + 229200 in the accepted dynamic eligible-market-cap split.
+>
+> Rebalance every 84 trading days, target changes T+1.
 
-The promotion gates are applied to the `conservative_after_tax` result, not the gross result.
+This is a low-frequency systematic asset-allocation baseline, not a proven alpha strategy. The historical test still covers the same 2018-01-01 through 2026-03-20 window and should not be interpreted as an independent future OOS guarantee.
 
-Modeled tax:
-
-- 15.4% on disclosed distributions
-- 15.4% on every positive realized defensive-ETF market-price gain
-
-The second rule is intentionally adverse. Actual Korean ETF sale taxation uses the lesser of market gain and the standard-tax-base increase, so the frozen model can overstate tax. A defensive ETF must still pass under this conservative approximation to be promoted.
-
-## Frozen promotion gates vs zero-yield 60/40 baseline
-
-A full-history defensive ETF can advance only if all hold:
-
-1. MDD no worse by more than 1.0 percentage point
-2. Sharpe no worse by more than 0.03
-3. Calmar no worse by more than 10%
-4. CAGR no worse by more than 0.50 percentage point
-5. worst five-year total return no worse by more than 2 percentage points
-6. no data-integrity or execution-feasibility failure
-
-Among passers, choose by:
-
-1. lower MDD
-2. higher Sharpe
-3. higher Calmar
-4. lower operational complexity / modeled cost
-
-CAGR alone cannot select the winner.
-
-## Execution blocker
-
-The current GitHub Actions safe-sleeve runs fail before any runner step is created (`steps=null`, no job logs). Unrelated workflows on the same PR fail in the same pre-step state. Therefore these failures are classified as execution-infrastructure failures, not strategy results.
-
-The code and workflow are prepared:
-
-- `scripts/run_etf_safe_sleeve_study.py`
-- `.github/workflows/etf-safe-sleeve-study.yml`
-
-The workflow guard now requires the frozen 2018 distributions, 2025-2026 monthly distributions, 15.4% tax rate and conservative-after-tax selection mode to be present before execution.
-
-## Decision while blocked
-
-- **Historical canonical defensive sleeve:** `cash_zero` (temporary baseline, not claimed optimum)
-- **214980 / 273140:** pending frozen execution; neither is promoted or rejected
-- **423160 / 459580:** operational diagnostics only; cannot retroactively win the full-history study
-- **Do not add/tune candidates, exposure levels, duration buckets or rebalance intervals while blocked.**
-
-Once execution infrastructure is available, run the frozen study exactly once under the above rules, persist `comparison.csv`/`result.json`, and replace this pending status with the observed verdict. No rescue tuning is allowed.
+No additional safe-sleeve ETF, exposure ratio, duration bucket, or cadence should be tuned on this same history to rescue or improve the result.
