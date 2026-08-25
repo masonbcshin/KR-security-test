@@ -2,12 +2,21 @@ name: Personal-quant financial refresh
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/personal-quant-financial-refresh.yml
+      - scripts/discover_opendart_bulk_financials.py
+      - scripts/stage_opendart_bulk_financials.py
+      - scripts/generate_personal_quant_etf_orders.py
 
 permissions:
   contents: read
 
 jobs:
   refresh:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -151,7 +160,6 @@ jobs:
               'duplicate_period_keys':dup,
               'sqlite_integrity_check':integrity,
           }
-          # Market/adjusted layers are immutable in a financial-only refresh.
           if list(daily) != list(before['daily_prices']):
               raise SystemExit(f'daily_prices changed unexpectedly: {before["daily_prices"]} -> {daily}')
           if list(adj) != list(before['adj_daily_prices']):
