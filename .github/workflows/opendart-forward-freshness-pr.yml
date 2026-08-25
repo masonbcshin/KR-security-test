@@ -7,6 +7,7 @@ on:
     paths:
       - scripts/discover_opendart_bulk_financials.py
       - scripts/stage_opendart_bulk_financials.py
+      - scripts/prepare_forward_financial_snapshot.py
       - .github/workflows/opendart-forward-freshness-pr.yml
   workflow_dispatch:
 
@@ -16,7 +17,7 @@ permissions:
 jobs:
   opendart-forward-freshness:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
       PYTHONUNBUFFERED: "1"
@@ -34,7 +35,10 @@ jobs:
 
       - name: Syntax and safety guard
         run: |
-          python -m py_compile scripts/discover_opendart_bulk_financials.py scripts/stage_opendart_bulk_financials.py
+          python -m py_compile \
+            scripts/discover_opendart_bulk_financials.py \
+            scripts/stage_opendart_bulk_financials.py \
+            scripts/prepare_forward_financial_snapshot.py
           python - <<'PY'
           from pathlib import Path
           p=Path('scripts/stage_opendart_bulk_financials.py').read_text(encoding='utf-8')
@@ -43,45 +47,85 @@ jobs:
           assert 'sqlite3' not in p
           assert 'FinancialDataLoader' not in p
           assert 'Mozilla/5.0' in p
+          q=Path('scripts/prepare_forward_financial_snapshot.py').read_text(encoding='utf-8')
+          assert 'exclude all signal-year AlphaKRX raw ZIPs' in q
+          assert 'FORWARD_FINANCIAL_SNAPSHOT_READY' in q
           print('staging_safety_guard=PASS')
+          print('composition_policy_guard=PASS')
           PY
 
-      - name: Discover current official OpenDART inventory
-        run: |
-          python scripts/discover_opendart_bulk_financials.py --output outputs/opendart_discovery
-
-      - name: Stage exact observed 2026Q2 ZIP set
-        run: |
-          python scripts/stage_opendart_bulk_financials.py \
-            --discovery-json outputs/opendart_discovery/discovery.json \
-            --year 2026 \
-            --quarter 2 \
-            --output outputs/opendart_2026q2
-
-      - name: Checkout pinned AlphaKRX parser
+      - name: Checkout pinned AlphaKRX parser and historical data base
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git work/AlphaKRX
           git -C work/AlphaKRX checkout "$ALPHAKRX_SHA"
           test "$(git -C work/AlphaKRX rev-parse HEAD)" = "$ALPHAKRX_SHA"
+          test -f work/AlphaKRX/etl/financial_etl.py
+          test -d work/AlphaKRX/data/raw_financial
 
-      - name: Parse into disposable SQLite and enforce PIT freshness
+      - name: Build official current-year composite financial snapshot
+        id: compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIGNAL_DATE="$(TZ=Asia/Seoul date +%Y%m%d)"
+          echo "signal_date=$SIGNAL_DATE" >> "$GITHUB_OUTPUT"
+          python scripts/prepare_forward_financial_snapshot.py \
+            --signal-date "$SIGNAL_DATE" \
+            --base-data-root work/AlphaKRX \
+            --base-data-sha "$ALPHAKRX_SHA" \
+            --composite-data-root outputs/composite_alphakrx_data \
+            --output outputs/forward_financial_snapshot \
+            | tee outputs/forward_financial_snapshot.log
+
+      - name: Validate composition provenance
+        env:
+          SIGNAL_DATE: ${{ steps.compose.outputs.signal_date }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          p=Path('outputs/forward_financial_snapshot/forward_financial_snapshot_manifest.json')
+          x=json.loads(p.read_text(encoding='utf-8'))
+          assert x['status']=='FORWARD_FINANCIAL_SNAPSHOT_READY', x
+          assert x['signal_date']==os.environ['SIGNAL_DATE'], x
+          assert x['base_alphakrx_sha']=='e773d4243b7a644dd0c525daccebdf062bc389a1', x
+          assert x['current_year_policy'].startswith('exclude all signal-year AlphaKRX'), x
+          assert x['observed_complete_quarters'], x
+          assert x['supplement_files'], x
+          names={f['file_name'] for f in x['supplement_files']}
+          raw=Path('outputs/composite_alphakrx_data/data/raw_financial')
+          current={q.name for q in raw.glob(f"{x['signal_year']}_*.zip")}
+          assert current==names, (current,names)
+          for f in x['supplement_files']:
+              h=hashlib.sha256((raw/f['file_name']).read_bytes()).hexdigest()
+              assert h==f['sha256'], f
+          print(json.dumps({
+              'observed_complete_quarters':x['observed_complete_quarters'],
+              'supplement_files':len(x['supplement_files']),
+              'composite_zip_count':x['composite_zip_count'],
+          },ensure_ascii=False,indent=2))
+          PY
+
+      - name: Parse composite current-year files into disposable SQLite and enforce PIT
         env:
           PYTHONPATH: work/AlphaKRX
+          SIGNAL_DATE: ${{ steps.compose.outputs.signal_date }}
         run: |
           mkdir -p outputs/parser_smoke
           python - <<'PY'
-          import json, sqlite3, sys
+          import json, os, sqlite3, sys
           from pathlib import Path
           sys.path.insert(0, 'work/AlphaKRX')
           from etl.financial_etl import FinancialDataLoader
 
+          year=os.environ['SIGNAL_DATE'][:4]
           db=Path('outputs/parser_smoke/financial_smoke.db')
-          raw=Path('outputs/opendart_2026q2/raw_financial')
+          raw=Path('outputs/composite_alphakrx_data/data/raw_financial')
           loader=FinancialDataLoader(str(db), str(raw))
           loader.connect()
           try:
               loader.create_tables()
-              stats=loader.process_all('2026_2Q_*.zip')
+              stats=loader.process_all(f'{year}_*Q_*.zip')
           finally:
               loader.close()
 
@@ -90,13 +134,14 @@ jobs:
               bs_cf=con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0]
               pl=con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]
               dates=con.execute("SELECT MIN(fiscal_date),MAX(fiscal_date),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone()
-              std=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')='20260816'").fetchone()[0]
-              std_bad=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')<>'20260816'").fetchone()[0]
+              q2=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')='20260816'").fetchone()[0]
+              q2_bad=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')<>'20260816'").fetchone()[0]
               dup=con.execute("SELECT COUNT(*) FROM (SELECT stock_code,fiscal_date,consolidation_type,COUNT(*) c FROM financial_periods GROUP BY stock_code,fiscal_date,consolidation_type HAVING c>1)").fetchone()[0]
               integrity=con.execute('PRAGMA integrity_check').fetchone()[0]
 
           audit={
               'alphakrx_sha':'e773d4243b7a644dd0c525daccebdf062bc389a1',
+              'signal_date':os.environ['SIGNAL_DATE'],
               'stats':stats,
               'periods':periods,
               'bs_cf_items':bs_cf,
@@ -105,8 +150,8 @@ jobs:
               'max_fiscal_date':dates[1],
               'min_available_date':dates[2],
               'max_available_date':dates[3],
-              'standard_dec_fy_2026q2_available_20260816':std,
-              'standard_dec_fy_2026q2_wrong_available_date':std_bad,
+              'standard_dec_fy_2026q2_available_20260816':q2,
+              'standard_dec_fy_2026q2_wrong_available_date':q2_bad,
               'duplicate_period_keys':dup,
               'sqlite_integrity_check':integrity,
           }
@@ -114,10 +159,10 @@ jobs:
               raise SystemExit(f'AlphaKRX parser errors: {audit}')
           if periods < 1000 or bs_cf < 10000 or pl < 10000:
               raise SystemExit(f'implausibly small parse: {audit}')
-          if dates[1] != '2026-06-30' or dates[3] != '20260816':
-              raise SystemExit(f'PIT date guard failed: {audit}')
-          if std < 4700 or std_bad != 0:
-              raise SystemExit(f'PIT availability guard failed: {audit}')
+          if dates[3] > os.environ['SIGNAL_DATE']:
+              raise SystemExit(f'future PIT availability detected: {audit}')
+          if q2 < 4700 or q2_bad != 0:
+              raise SystemExit(f'2026Q2 PIT availability guard failed: {audit}')
           if dup != 0 or integrity != 'ok':
               raise SystemExit(f'SQLite integrity guard failed: {audit}')
           Path('outputs/parser_smoke/audit.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
@@ -130,9 +175,10 @@ jobs:
         with:
           name: kr-opendart-forward-freshness-pr
           path: |
-            outputs/opendart_discovery/discovery.json
-            outputs/opendart_2026q2/manifest.json
-            outputs/opendart_2026q2/download_diagnostics/*.json
+            outputs/forward_financial_snapshot/forward_financial_snapshot_manifest.json
+            outputs/forward_financial_snapshot/discovery/discovery.json
+            outputs/forward_financial_snapshot/opendart_*/manifest.json
+            outputs/forward_financial_snapshot/opendart_*/download_diagnostics/*.json
             outputs/parser_smoke/audit.json
           if-no-files-found: warn
           retention-days: 14
