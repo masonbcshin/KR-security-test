@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   paper-core-check:
@@ -75,6 +76,7 @@ jobs:
     timeout-minutes: 180
     env:
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+      OPENDART_ARTIFACT_ID: '9566865154'
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
@@ -122,11 +124,43 @@ jobs:
           Path('outputs/financial_refresh/base_before.json').write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(x,ensure_ascii=False,indent=2))
           PY
-      - name: Discover and stage official 2026Q2 OpenDART files
+      - name: Restore pinned validated OpenDART 2026Q2 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python scripts/discover_opendart_bulk_financials.py --output outputs/opendart_discovery
-          python scripts/stage_opendart_bulk_financials.py --discovery-json outputs/opendart_discovery/discovery.json --year 2026 --quarter 2 --output outputs/opendart_2026q2
+          mkdir -p outputs
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${OPENDART_ARTIFACT_ID}/zip" \
+            -o outputs/opendart-parser-smoke.zip
+          rm -rf outputs/opendart_discovery outputs/opendart_2026q2 outputs/parser_smoke
+          unzip -q outputs/opendart-parser-smoke.zip -d outputs
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          expected={
+            '2026_2Q_BS_20260825030451.zip':'cc4292db848bda6fe0c2af8c809ec18ed003ec6cd98a618a37c1146bf2d679f2',
+            '2026_2Q_PL_20260825030912.zip':'959be84a1111587ce71e161a3208fdabee396b73b4d5e257688c461d6a055a4c',
+            '2026_2Q_CF_20260825031240.zip':'4a2f77674e70b0d652f9ab515f187d61f75088491788b58d8fdd3bcdc30695a3',
+            '2026_2Q_CE_20260825031612.zip':'ef50da93ae8dfd12780cec0e7414d63cbade2bb98e958a5c05607a9e23f7f006',
+          }
+          root=Path('outputs/opendart_2026q2/raw_financial')
+          actual={}
+          for name,want in expected.items():
+              p=root/name
+              if not p.is_file(): raise SystemExit(f'missing pinned OpenDART ZIP: {name}')
+              got=hashlib.sha256(p.read_bytes()).hexdigest(); actual[name]=got
+              if got!=want: raise SystemExit(f'OpenDART ZIP hash mismatch: {name} {got} != {want}')
+          manifest=json.loads(Path('outputs/opendart_2026q2/manifest.json').read_text(encoding='utf-8'))
+          parser=json.loads(Path('outputs/parser_smoke/audit.json').read_text(encoding='utf-8'))
+          if manifest.get('status')!='STAGED_VALIDATED': raise SystemExit(manifest)
+          if parser.get('stats',{}).get('errors')!=0: raise SystemExit(parser)
+          if parser.get('standard_dec_fy_2026q2_wrong_available_date')!=0: raise SystemExit(parser)
+          print(json.dumps({'artifact_id':9566865154,'zip_hashes':actual,'parser_periods':parser.get('periods'),'parser_std_20260816':parser.get('standard_dec_fy_2026q2_available_20260816')},indent=2))
+          PY
       - name: Import staged 2026Q2 into validation DB
         env:
           PYTHONPATH: work/AlphaKRX
@@ -185,8 +219,8 @@ jobs:
           name: kr-personal-quant-financial-refresh-validation
           path: |
             outputs/financial_refresh/**/*
-            outputs/opendart_discovery/discovery.json
             outputs/opendart_2026q2/manifest.json
+            outputs/parser_smoke/audit.json
             outputs/refreshed_live/**/*
           if-no-files-found: warn
           retention-days: 30
