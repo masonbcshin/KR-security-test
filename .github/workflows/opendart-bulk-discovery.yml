@@ -37,6 +37,7 @@ jobs:
           p = Path('scripts/discover_opendart_bulk_financials.py').read_text(encoding='utf-8')
           for token in (
               'https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/main.do',
+              'https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/list.do',
               'downloads_financial_zip": False',
               'mutates_database": False',
               'weakens_pit_freshness_gate": False',
@@ -46,20 +47,22 @@ jobs:
           print('opendart_discovery_safety_guard=PASS')
           PY
 
-      - name: Probe official OpenDART page
+      - name: Probe official OpenDART inventory
         run: |
           python scripts/discover_opendart_bulk_financials.py \
             --output outputs/opendart_bulk_discovery | tee outputs-opendart-discovery.log
 
-      - name: Print compact discovered metadata
+      - name: Print compact discovered inventory
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
           x = json.loads(Path('outputs/opendart_bulk_discovery/discovery.json').read_text(encoding='utf-8'))
           print('status=', x['status'])
-          print('candidate_count=', x['candidate_count'])
-          for row in x['candidate_records'][:20]:
+          print('inventory_count=', x['inventory_count'])
+          print('business_years=', x['business_years'])
+          print('latest_business_year=', x['latest_business_year'])
+          for row in x['inventory_records'][:40]:
               print(json.dumps(row, ensure_ascii=False)[:3000])
           PY
 
@@ -68,8 +71,7 @@ jobs:
         with:
           name: kr-opendart-bulk-discovery
           path: |
-            outputs/opendart_bulk_discovery/discovery.json
-            outputs/opendart_bulk_discovery/page.html
+            outputs/opendart_bulk_discovery/
             outputs-opendart-discovery.log
           if-no-files-found: error
           retention-days: 14
