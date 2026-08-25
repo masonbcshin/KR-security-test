@@ -1,0 +1,138 @@
+name: OpenDART forward freshness PR check
+
+on:
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/discover_opendart_bulk_financials.py
+      - scripts/stage_opendart_bulk_financials.py
+      - .github/workflows/opendart-forward-freshness-pr.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  opendart-forward-freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pandas numpy
+
+      - name: Syntax and safety guard
+        run: |
+          python -m py_compile scripts/discover_opendart_bulk_financials.py scripts/stage_opendart_bulk_financials.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stage_opendart_bulk_financials.py').read_text(encoding='utf-8')
+          assert 'ROLES = ("BS", "PL", "CF", "CE")' in p
+          assert 'mutates_database": False' in p
+          assert 'sqlite3' not in p
+          assert 'FinancialDataLoader' not in p
+          assert 'Mozilla/5.0' in p
+          print('staging_safety_guard=PASS')
+          PY
+
+      - name: Discover current official OpenDART inventory
+        run: |
+          python scripts/discover_opendart_bulk_financials.py --output outputs/opendart_discovery
+
+      - name: Stage exact observed 2026Q2 ZIP set
+        run: |
+          python scripts/stage_opendart_bulk_financials.py \
+            --discovery-json outputs/opendart_discovery/discovery.json \
+            --year 2026 \
+            --quarter 2 \
+            --output outputs/opendart_2026q2
+
+      - name: Checkout pinned AlphaKRX parser
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git work/AlphaKRX
+          git -C work/AlphaKRX checkout "$ALPHAKRX_SHA"
+          test "$(git -C work/AlphaKRX rev-parse HEAD)" = "$ALPHAKRX_SHA"
+
+      - name: Parse into disposable SQLite and enforce PIT freshness
+        env:
+          PYTHONPATH: work/AlphaKRX
+        run: |
+          mkdir -p outputs/parser_smoke
+          python - <<'PY'
+          import json, sqlite3, sys
+          from pathlib import Path
+          sys.path.insert(0, 'work/AlphaKRX')
+          from etl.financial_etl import FinancialDataLoader
+
+          db=Path('outputs/parser_smoke/financial_smoke.db')
+          raw=Path('outputs/opendart_2026q2/raw_financial')
+          loader=FinancialDataLoader(str(db), str(raw))
+          loader.connect()
+          try:
+              loader.create_tables()
+              stats=loader.process_all('2026_2Q_*.zip')
+          finally:
+              loader.close()
+
+          with sqlite3.connect(db) as con:
+              periods=con.execute('SELECT COUNT(*) FROM financial_periods').fetchone()[0]
+              bs_cf=con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0]
+              pl=con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]
+              dates=con.execute("SELECT MIN(fiscal_date),MAX(fiscal_date),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone()
+              std=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')='20260816'").fetchone()[0]
+              std_bad=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')<>'20260816'").fetchone()[0]
+              dup=con.execute("SELECT COUNT(*) FROM (SELECT stock_code,fiscal_date,consolidation_type,COUNT(*) c FROM financial_periods GROUP BY stock_code,fiscal_date,consolidation_type HAVING c>1)").fetchone()[0]
+              integrity=con.execute('PRAGMA integrity_check').fetchone()[0]
+
+          audit={
+              'alphakrx_sha':'e773d4243b7a644dd0c525daccebdf062bc389a1',
+              'stats':stats,
+              'periods':periods,
+              'bs_cf_items':bs_cf,
+              'pl_items':pl,
+              'min_fiscal_date':dates[0],
+              'max_fiscal_date':dates[1],
+              'min_available_date':dates[2],
+              'max_available_date':dates[3],
+              'standard_dec_fy_2026q2_available_20260816':std,
+              'standard_dec_fy_2026q2_wrong_available_date':std_bad,
+              'duplicate_period_keys':dup,
+              'sqlite_integrity_check':integrity,
+          }
+          if stats.get('errors') != 0:
+              raise SystemExit(f'AlphaKRX parser errors: {audit}')
+          if periods < 1000 or bs_cf < 10000 or pl < 10000:
+              raise SystemExit(f'implausibly small parse: {audit}')
+          if dates[1] != '2026-06-30' or dates[3] != '20260816':
+              raise SystemExit(f'PIT date guard failed: {audit}')
+          if std < 4700 or std_bad != 0:
+              raise SystemExit(f'PIT availability guard failed: {audit}')
+          if dup != 0 or integrity != 'ok':
+              raise SystemExit(f'SQLite integrity guard failed: {audit}')
+          Path('outputs/parser_smoke/audit.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(audit,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-opendart-forward-freshness-pr
+          path: |
+            outputs/opendart_discovery/discovery.json
+            outputs/opendart_2026q2/manifest.json
+            outputs/opendart_2026q2/download_diagnostics/*.json
+            outputs/parser_smoke/audit.json
+          if-no-files-found: warn
+          retention-days: 14
