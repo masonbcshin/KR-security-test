@@ -184,10 +184,12 @@ def main():
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
-        "Referer": LIST_URL,
+        # list.do is loaded by AJAX into main.do; browser navigation originates
+        # from the main document when download_ext002 changes window.location.
+        "Referer": MAIN_URL,
     })
     session.get(MAIN_URL, timeout=TIMEOUT).raise_for_status()
-    session.get(LIST_URL, timeout=TIMEOUT).raise_for_status()
+    session.get(LIST_URL, timeout=TIMEOUT, headers={"Referer": MAIN_URL}).raise_for_status()
 
     manifest_rows = []
     for row in selected:
@@ -198,7 +200,7 @@ def main():
             params={"fl_nm": filename},
             timeout=TIMEOUT,
             allow_redirects=True,
-            headers={"Referer": LIST_URL},
+            headers={"Referer": MAIN_URL},
         )
         response.raise_for_status()
         diagnostic = response_diagnostic(response, filename)
