@@ -97,19 +97,19 @@ jobs:
           git -C work/AlphaKRX fetch --depth=1 origin "$ALPHAKRX_SHA"
           git -C work/AlphaKRX checkout --detach FETCH_HEAD
           test "$(git -C work/AlphaKRX rev-parse HEAD)" = "$ALPHAKRX_SHA"
-      - name: Cache 2022-2026 marcap parquet
+      - name: Cache 2018-2026 marcap parquet
         uses: actions/cache@v4
         with:
           path: .cache/marcap
-          key: pq-forward-marcap-${{ runner.os }}-2022-2026
-      - name: Build sufficient 2022-2026 validation DB
+          key: pq-forward-marcap-${{ runner.os }}-2018-2026
+      - name: Build validation DB with frozen schedule origin
         run: |
           set -euo pipefail
           mkdir -p outputs/financial_refresh work
-          python scripts/build_marcap_db_ci.py --phase prices --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/prices.log
-          python scripts/build_marcap_db_ci.py --phase financial --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 --financial-start-year 2022 --financial-end-year 2025 | tee outputs/financial_refresh/financial_base.log
-          python scripts/build_marcap_db_ci.py --phase adjusted --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/adjusted.log
-          python scripts/build_marcap_db_ci.py --phase audit --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/base_audit.log
+          python scripts/build_marcap_db_ci.py --phase prices --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2018 --end-year 2026 | tee outputs/financial_refresh/prices.log
+          python scripts/build_marcap_db_ci.py --phase financial --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2018 --end-year 2026 --financial-start-year 2022 --financial-end-year 2025 | tee outputs/financial_refresh/financial_base.log
+          python scripts/build_marcap_db_ci.py --phase adjusted --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2018 --end-year 2026 | tee outputs/financial_refresh/adjusted.log
+          python scripts/build_marcap_db_ci.py --phase audit --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2018 --end-year 2026 | tee outputs/financial_refresh/base_audit.log
       - name: Record base DB state
         run: |
           python - <<'PY'
@@ -117,6 +117,8 @@ jobs:
           from pathlib import Path
           with sqlite3.connect('work/krx_stock_data_forward.db') as con:
               x={'daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM daily_prices').fetchone(),'adj_daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM adj_daily_prices').fetchone(),'financial_periods':con.execute("SELECT COUNT(*),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone(),'financial_bs_cf':con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0],'financial_pl':con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]}
+          if x['daily_prices'][0] != '20180102':
+              raise SystemExit(f'frozen schedule origin missing from validation DB: {x}')
           Path('outputs/financial_refresh/base_before.json').write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(x,ensure_ascii=False,indent=2))
           PY
