@@ -1,0 +1,82 @@
+name: Balanced trend v2 dispatcher
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  tournament:
+    if: >
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/balanced-trend-v2' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Checkout triggering PR head
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          fetch-depth: 1
+      - name: Guard preregistration and runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f balanced_trend_v2/PROTOCOL.md
+          test -f balanced_trend_v2/backtest.py
+          grep -q '결과 확인 전 사전등록' balanced_trend_v2/PROTOCOL.md
+          grep -q 'BOOTSTRAP' balanced_trend_v2/PROTOCOL.md
+          grep -q 'A_current_v1' balanced_trend_v2/backtest.py
+          grep -q 'E_robust_risk_managed' balanced_trend_v2/backtest.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r balanced_trend_v2/requirements.txt
+      - name: Syntax check
+        run: python -m py_compile balanced_trend_v2/backtest.py
+      - name: Run preregistered tournament
+        id: research
+        continue-on-error: true
+        run: python balanced_trend_v2/backtest.py 2>&1 | tee balanced_trend_v2/run.log
+      - name: Build result comment
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('balanced_trend_v2/out/REPORT.md')
+          if p.exists():
+              body='## Balanced Trend v2 — result\n\n'+p.read_text(encoding='utf-8')
+          else:
+              log=Path('balanced_trend_v2/run.log')
+              tail='\n'.join(log.read_text(encoding='utf-8',errors='replace').splitlines()[-40:]) if log.exists() else 'no run log'
+              body='## Balanced Trend v2 — execution failed\n\n```text\n'+tail+'\n```'
+          Path('balanced_trend_v2/result-comment.md').write_text(body+'\n',encoding='utf-8')
+          PY
+      - name: Comment result
+        if: always()
+        shell: bash
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" --method POST -f body="$(cat balanced_trend_v2/result-comment.md)"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: balanced-trend-v2-results
+          path: |
+            balanced_trend_v2/out
+            balanced_trend_v2/run.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Fail if research failed
+        if: steps.research.outcome != 'success'
+        run: exit 1
