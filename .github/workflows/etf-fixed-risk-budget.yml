@@ -1,0 +1,88 @@
+name: ETF fixed risk-budget study
+
+on:
+  pull_request:
+    paths:
+      - scripts/run_etf_fixed_risk_budget.py
+      - .github/workflows/etf-fixed-risk-budget.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  risk-budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ACCEPTED_RUN_ID: '32492902475'
+      ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Guard preregistration constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/run_etf_fixed_risk_budget.py').read_text(encoding='utf-8')
+          for x in ('PREREG_COMMENT_ID = 5376827268','EXPOSURES = (1.0, 0.8, 0.7, 0.6, 0.5)','BOOTSTRAP_PATHS = 20_000','BOOTSTRAP_BLOCK = 21','BOOTSTRAP_SEED = 20260822'):
+              assert x in p, x
+          print('frozen_runner_guard=PASS')
+          PY
+
+      - name: Download immutable accepted artifact
+        run: |
+          set -euo pipefail
+          mkdir -p work/accepted
+          gh run download "$ACCEPTED_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ACCEPTED_ARTIFACT_NAME" --dir work/accepted
+          SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
+          test -n "$SIG"
+          echo "ACCEPTED_ARTIFACT_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
+
+      - name: Execute frozen fixed-risk-budget study
+        run: |
+          set -euo pipefail
+          mkdir -p outputs
+          python scripts/run_etf_fixed_risk_budget.py \
+            --accepted-artifact-dir "$ACCEPTED_ARTIFACT_DIR" \
+            --output outputs/etf_fixed_risk_budget | tee outputs/etf_fixed_risk_budget.log
+
+      - name: Print result
+        if: always()
+        run: |
+          if [[ -f outputs/etf_fixed_risk_budget/comparison.csv ]]; then
+            echo '### Fixed equity-risk budget comparison' >> "$GITHUB_STEP_SUMMARY"
+            echo '```csv' >> "$GITHUB_STEP_SUMMARY"
+            cat outputs/etf_fixed_risk_budget/comparison.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f outputs/etf_fixed_risk_budget/result.json ]]; then
+            echo '### Selection' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat outputs/etf_fixed_risk_budget/result.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-fixed-risk-budget
+          path: |
+            outputs/etf_fixed_risk_budget/**/*
+            outputs/etf_fixed_risk_budget.log
+          if-no-files-found: warn
+          retention-days: 14

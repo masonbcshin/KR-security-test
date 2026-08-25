@@ -1,0 +1,164 @@
+name: Publish immutable KR research DB
+
+on:
+  push:
+    branches: [agent/marcap-tournament]
+    paths:
+      - '.github/workflows/publish-research-db.yml'
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/research/publish-research-db-trigger.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  publish-research-db:
+    if: github.event_name != 'pull_request' || github.head_ref == 'infra/publish-research-db-run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONUNBUFFERED: '1'
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+      ARTIFACT_NAME: kr-research-db-v4-2011-2026-2015-2025
+    steps:
+      - name: Checkout frozen publisher source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+
+      - name: Record source SHA
+        run: echo "PUBLISHER_SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Checkout pinned AlphaKRX
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx
+          git -C vendor/alphakrx sparse-checkout init --cone
+          git -C vendor/alphakrx sparse-checkout set etl ml data/raw_financial
+          git -C vendor/alphakrx fetch --depth=1 origin "$ALPHAKRX_SHA"
+          git -C vendor/alphakrx checkout --detach FETCH_HEAD
+          test "$(git -C vendor/alphakrx rev-parse HEAD)" = "$ALPHAKRX_SHA"
+
+      - name: Cache marcap yearly parquet
+        uses: actions/cache@v4
+        with:
+          path: .cache/marcap
+          key: marcap-${{ runner.os }}-2011-2026
+
+      - name: Build full price DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work outputs/research_db
+          python scripts/build_marcap_db_ci.py \
+            --phase prices \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/research_db/db_prices.log
+
+      - name: Load PIT financials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase financial \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 \
+            --financial-start-year 2015 \
+            --financial-end-year 2025 | tee outputs/research_db/db_financial.log
+
+      - name: Build adjusted prices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase adjusted \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/research_db/db_adjusted.log
+
+      - name: Audit full DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase audit \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/research_db/db_audit.log
+          test -s work/krx_stock_data.db
+
+      - name: Freeze manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum work/krx_stock_data.db | tee outputs/research_db/krx_stock_data.db.sha256
+          {
+            echo "publisher_run_id=${GITHUB_RUN_ID}"
+            echo "publisher_source_sha=${PUBLISHER_SOURCE_SHA}"
+            echo "alphakrx_sha=${ALPHAKRX_SHA}"
+            echo "price_years=2011-2026"
+            echo "financial_years=2015-2025"
+            echo "artifact_name=${ARTIFACT_NAME}"
+            echo "db_bytes=$(stat -c%s work/krx_stock_data.db)"
+          } | tee outputs/research_db/manifest.txt
+
+      - name: Upload immutable research DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            work/krx_stock_data.db
+            outputs/research_db/*.log
+            outputs/research_db/*.sha256
+            outputs/research_db/manifest.txt
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6
+
+      - name: Record publisher run on research ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_SHA="$(cut -d' ' -f1 outputs/research_db/krx_stock_data.db.sha256)"
+          BODY=$(cat <<EOF
+          ### Immutable research DB published
+
+          - run: \`${GITHUB_RUN_ID}\`
+          - publisher source commit: \`${PUBLISHER_SOURCE_SHA}\`
+          - pinned AlphaKRX: \`${ALPHAKRX_SHA}\`
+          - artifact: \`${ARTIFACT_NAME}\`
+          - DB SHA256: \`${DB_SHA}\`
+          - price coverage build: 2011-2026
+          - PIT financial build: 2015-2025
+          - adjusted-price + DB audit: PASS
+
+          Future frozen challengers should download this run/artifact instead of rebuilding the DB inside each PR. Any DB refresh requires a new publisher run and a new manifest; do not silently replace the pinned artifact for an already-preregistered experiment.
+          EOF
+          )
+          gh api "repos/${GITHUB_REPOSITORY}/issues/1/comments" --method POST -f body="$BODY"

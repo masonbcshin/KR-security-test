@@ -1,0 +1,92 @@
+name: Long-reversal challenger
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  challenger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Checkout pinned AlphaKRX feature engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx
+          git -C vendor/alphakrx sparse-checkout init --cone
+          git -C vendor/alphakrx sparse-checkout set ml
+          git -C vendor/alphakrx fetch --depth=1 origin "$ALPHAKRX_SHA"
+          git -C vendor/alphakrx checkout --detach FETCH_HEAD
+          test -f vendor/alphakrx/ml/features/_pipeline.py
+
+      - name: Syntax check
+        run: python -m py_compile scripts/run_portable_tournament.py scripts/run_long_reversal_challenger.py
+
+      - name: Restore cached full research DB
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Require full DB cache hit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
+          test -s work/krx_stock_data.db
+
+      - name: Run 2018-2026 long-reversal challenger
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs
+          python scripts/run_long_reversal_challenger.py \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --feature-start 20150101 \
+            --test-start 20180101 \
+            --end 20260320 \
+            --output outputs/reversal | tee outputs/reversal.log
+
+      - name: Print comparison
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f outputs/reversal/comparison.csv ]]; then
+            echo "### Pre-registered long-reversal comparison" >> "$GITHUB_STEP_SUMMARY"
+            echo '```csv' >> "$GITHUB_STEP_SUMMARY"
+            cat outputs/reversal/comparison.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload challenger artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-long-reversal-challenger
+          path: |
+            outputs/reversal/**/*.csv
+            outputs/reversal/**/*.json
+            outputs/reversal.log
+          if-no-files-found: warn
+          retention-days: 14

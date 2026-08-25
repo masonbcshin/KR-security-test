@@ -1,0 +1,245 @@
+name: GPA single-factor PR research
+
+on:
+  pull_request:
+    branches: [agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  gpa-single-factor:
+    if: github.event.pull_request.number == 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONUNBUFFERED: '1'
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+      ACCEPTED_RUN_ID: '32492902475'
+      ACCEPTED_ARTIFACT_NAME: 'kr-etf-rebalance-robustness'
+    steps:
+      - name: Announce
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/issues/5/comments" --method POST \
+            -f body="Frozen GPA single-factor run started: \`${GITHUB_RUN_ID}\`, head \`${{ github.event.pull_request.head.sha }}\`."
+
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Guard preregistered constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/run_gpa_single_factor.py').read_text(encoding='utf-8')
+          for token in (
+              'RESEARCH_ID = "RL-2026-08-22-GPA-SINGLE-001"',
+              'PREREG_COMMENT_ID = 5376628989',
+              'BOOTSTRAP_PATHS = 20_000',
+              'BOOTSTRAP_BLOCK = 21',
+              'BOOTSTRAP_SEED = 20260822',
+              '"full_sharpe_improvement_min": 0.10',
+              '"pre2025_sharpe_improvement_min": 0.10',
+              '"cagr_gap_min": -0.01',
+              '"mdd_gap_min": -0.05',
+              '"min_gpa_coverage": 0.70',
+              '"min_valid_gpa_names": 200',
+          ):
+              assert token in p, token
+          print('frozen_gpa_guard=PASS')
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install system and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Checkout pinned AlphaKRX research engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx
+          git -C vendor/alphakrx sparse-checkout init --cone
+          git -C vendor/alphakrx sparse-checkout set etl ml data/raw_financial
+          git -C vendor/alphakrx fetch --depth=1 origin "$ALPHAKRX_SHA"
+          git -C vendor/alphakrx checkout --detach FETCH_HEAD
+          test -f vendor/alphakrx/ml/features/_pipeline.py
+          test -f vendor/alphakrx/etl/financial_etl.py
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/build_marcap_db.py \
+            scripts/build_marcap_db_ci.py \
+            scripts/run_portable_tournament.py \
+            scripts/run_long_reversal_challenger.py \
+            scripts/run_gpa_single_factor.py
+
+      - name: Cache marcap yearly parquet
+        uses: actions/cache@v4
+        with:
+          path: .cache/marcap
+          key: marcap-${{ runner.os }}-2011-2026
+
+      - name: Restore cached full research DB
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Report DB source
+        run: echo "db_cache_hit=${{ steps.dbcache.outputs.cache-hit }}"
+
+      - name: Build full marcap price DB on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/gpa_single_factor work
+          python scripts/build_marcap_db_ci.py \
+            --phase prices \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_prices.log
+
+      - name: Load PIT financials on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase financial \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 \
+            --financial-start-year 2015 \
+            --financial-end-year 2025 | tee outputs/gpa_single_factor/db_financial.log
+
+      - name: Build adjusted prices on cache miss
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_marcap_db_ci.py \
+            --phase adjusted \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_adjusted.log
+
+      - name: Audit full research DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s work/krx_stock_data.db
+          mkdir -p outputs/gpa_single_factor
+          python scripts/build_marcap_db_ci.py \
+            --phase audit \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --start-year 2011 \
+            --end-year 2026 | tee outputs/gpa_single_factor/db_audit.log
+
+      - name: Save rebuilt full research DB cache
+        if: steps.dbcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Download immutable accepted ETF artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/accepted
+          gh run download "$ACCEPTED_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ACCEPTED_ARTIFACT_NAME" --dir work/accepted
+          SIG="$(find work/accepted -type f -path '*/cadence_84d/signals.csv' -print -quit)"
+          test -n "$SIG"
+          echo "ACCEPTED_ARTIFACT_DIR=$(dirname "$(dirname "$SIG")")" >> "$GITHUB_ENV"
+
+      - name: Execute preregistered GPA challenger
+        id: research
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p outputs/gpa_single_factor
+          python scripts/run_gpa_single_factor.py \
+            --alphakrx-root vendor/alphakrx \
+            --db work/krx_stock_data.db \
+            --accepted-artifact-dir "$ACCEPTED_ARTIFACT_DIR" \
+            --feature-start 20150101 \
+            --test-start 20180101 \
+            --end 20260320 \
+            --output outputs/gpa_single_factor \
+            2>&1 | tee outputs/gpa_single_factor/run.log
+
+      - name: Build result comment
+        if: always()
+        env:
+          RESEARCH_OUTCOME: ${{ steps.research.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path('outputs/gpa_single_factor'); p=root/'result.json'
+          L=['## Pure GPA single-factor — frozen result','',f"- run: `{os.environ['GITHUB_RUN_ID']}`",f"- execution: **{os.environ.get('RESEARCH_OUTCOME')}**",'- preregistration: PR #1 comment `5376628989`']
+          if p.exists():
+              d=json.loads(p.read_text(encoding='utf-8'))
+              q=d['data_quality']; L += ['', '### Data quality', f"- pass: **{d['data_quality_pass']}**", f"- min GPA coverage: **{q['min_coverage']:.2%}**" if q['min_coverage'] is not None else '- min GPA coverage: —', f"- min valid GPA names: **{q['min_valid_names']}**"]
+              if d.get('gpa'):
+                  b=d['accepted_baseline']; g=d['gpa']; v=d['gate_values']; ck=d['gate_checks']; op=d['operations']
+                  L += ['', '|Metric|Accepted 84d ETF|Pure GPA|Delta|','|---|---:|---:|---:|',
+                    f"|CAGR|{b['cagr']:.3%}|{g['cagr']:.3%}|{g['cagr']-b['cagr']:+.3%}|",
+                    f"|Sharpe|{b['sharpe']:.3f}|{g['sharpe']:.3f}|{g['sharpe']-b['sharpe']:+.3f}|",
+                    f"|MDD|{b['max_drawdown']:.3%}|{g['max_drawdown']:.3%}|{g['max_drawdown']-b['max_drawdown']:+.3%}|",
+                    f"|Calmar|{b['calmar']:.3f}|{g['calmar']:.3f}|{g['calmar']-b['calmar']:+.3f}|",'', '### Preregistered gates']
+                  for k in ('full_sharpe','pre2025_sharpe','calmar','cagr','mdd','subperiod_stability'): L.append(f"- {k}: **{'PASS' if ck[k] else 'FAIL'}**")
+                  L += [f"- 2018-2024 Sharpe delta: **{v['pre2025_sharpe_improvement']:+.3f}**",f"- bad subperiod count: **{v['bad_subperiod_count']}**",f"- transaction cost: **KRW {g['transaction_cost_krw']:,.0f}**",f"- gross turnover / initial capital: **{op['gross_turnover_multiple']:.2f}x**",f"- primary: **{'PASS' if d['primary_pass'] else 'FAIL'}**",f"- decision: **{d['decision']}**"]
+                  if d.get('bootstrap'):
+                      x=d['bootstrap']; L += ['', '### Fixed paired bootstrap',f"- P(GPA Sharpe > ETF): **{x['p_gpa_sharpe_gt_baseline']:.2%}**",f"- P(GPA CAGR > ETF): **{x['p_gpa_cagr_gt_baseline']:.2%}**",f"- median Sharpe edge: **{x['median_sharpe_edge']:+.3f}**",f"- bootstrap: **{'PASS' if d.get('bootstrap_pass') else 'FAIL'}**"]
+              else:
+                  L += ['', f"- decision: **{d.get('decision')}**"]
+          else:
+              L += ['', '- result.json: **missing**']; log=root/'run.log'
+              if log.exists(): L += ['```text',*log.read_text(errors='replace').splitlines()[-35:],'```']
+              for name in ('db_prices.log','db_financial.log','db_adjusted.log','db_audit.log'):
+                  q=root/name
+                  if q.exists(): L += ['',f'### {name} tail','```text',*q.read_text(errors='replace').splitlines()[-12:],'```']
+          Path('result-comment.md').write_text('\n'.join(L)+'\n',encoding='utf-8')
+          print(Path('result-comment.md').read_text())
+          PY
+
+      - name: Comment result
+        if: always()
+        run: gh api "repos/${GITHUB_REPOSITORY}/issues/5/comments" --method POST -f body="$(cat result-comment.md)"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-gpa-single-factor
+          path: outputs/gpa_single_factor
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if execution failed
+        if: steps.research.outcome != 'success'
+        run: exit 1

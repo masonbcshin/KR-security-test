@@ -1,0 +1,166 @@
+name: Forward ETF shadow ops PR check
+
+on:
+  pull_request:
+    branches: [main, agent/marcap-tournament]
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/build_forward_research_db.py
+      - scripts/generate_forward_etf_shadow_signal.py
+      - scripts/run_forward_etf_shadow.py
+      - scripts/check_forward_etf_shadow_due.py
+      - data/accepted_84d_control_schedule.json
+      - data/krx_market_calendar_2025_2029.json
+      - docs/research/FORWARD_ETF_SHADOW_RUNBOOK.md
+      - .github/workflows/forward-etf-shadow-pr.yml
+      - .github/workflows/forward-etf-shadow-scheduled.yml
+      - .github/workflows/portable-tournament.yml
+      - .github/workflows/etf-fixed-risk-budget.yml
+      - .github/workflows/etf-safe-sleeve-study.yml
+
+permissions:
+  contents: read
+
+jobs:
+  forward-ops-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install 'finance-datareader==0.9.201' 'PyYAML>=6,<7'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/build_forward_research_db.py \
+            scripts/generate_forward_etf_shadow_signal.py \
+            scripts/run_forward_etf_shadow.py \
+            scripts/check_forward_etf_shadow_due.py
+
+      - name: Frozen wrapper self-test
+        run: |
+          python scripts/run_forward_etf_shadow.py \
+            --self-test \
+            --calendar data/krx_market_calendar_2025_2029.json
+
+      - name: Lightweight scheduler self-test
+        run: |
+          python scripts/check_forward_etf_shadow_due.py \
+            --self-test \
+            --calendar data/krx_market_calendar_2025_2029.json
+
+      - name: Parse workflow YAML
+        run: |
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
+          for p in (
+              '.github/workflows/forward-etf-shadow-pr.yml',
+              '.github/workflows/forward-etf-shadow-scheduled.yml',
+              '.github/workflows/portable-tournament.yml',
+              '.github/workflows/etf-fixed-risk-budget.yml',
+              '.github/workflows/etf-safe-sleeve-study.yml',
+          ):
+              yaml.safe_load(Path(p).read_text(encoding='utf-8'))
+              print('yaml_parse=PASS', p)
+          PY
+
+      - name: Guard frozen constants, schedule proof, and ops policy
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          p = Path('scripts/generate_forward_etf_shadow_signal.py').read_text(encoding='utf-8')
+          b = Path('scripts/build_forward_research_db.py').read_text(encoding='utf-8')
+          w = Path('scripts/run_forward_etf_shadow.py').read_text(encoding='utf-8')
+          d = Path('scripts/check_forward_etf_shadow_due.py').read_text(encoding='utf-8')
+          sched = Path('.github/workflows/forward-etf-shadow-scheduled.yml').read_text(encoding='utf-8')
+          portable = Path('.github/workflows/portable-tournament.yml').read_text(encoding='utf-8')
+          fixed = Path('.github/workflows/etf-fixed-risk-budget.yml').read_text(encoding='utf-8')
+          safe = Path('.github/workflows/etf-safe-sleeve-study.yml').read_text(encoding='utf-8')
+          proof = json.loads(Path('data/accepted_84d_control_schedule.json').read_text(encoding='utf-8'))
+
+          for token in (
+              'RESEARCH_ID = "RL-2026-08-22-ETF-FORWARD-001"',
+              'FREEZE_DATE = "20260822"',
+              'ANCHOR_DATE = "20180102"',
+              'CADENCE = 84',
+              'TARGET_HORIZON = 42',
+              'CODES = ["226490", "229200"]',
+              'SMA_MONTHS = 10',
+              'BUY_COST = 0.0035',
+              'SELL_COST = 0.0055',
+              'rolling(SMA_MONTHS, min_periods=SMA_MONTHS).mean()',
+              'renormalize_remaining_on_sleeve": False',
+          ):
+              assert token in p, token
+
+          for token in (
+              'METHOD_ALPHAKRX_SHA = "e773d4243b7a644dd0c525daccebdf062bc389a1"',
+              'forward signals must not be reconstructed from a later snapshot',
+              'future financial availability detected',
+              '/ a.marcap_sha',
+          ):
+              assert token in b, token
+
+          for token in (
+              'ORIGINAL_ANCHOR = "20180102"',
+              'CONTINUATION_ANCHOR = "20251117"',
+              'CADENCE = 84',
+              'MAX_FINANCIAL_STALENESS_DAYS = 180',
+              'engine.actual_trading_dates = continuation_trading_dates',
+          ):
+              assert token in w, token
+
+          for token in (
+              'CONTINUATION_ANCHOR = "20251117"',
+              'EXPECTED_FIRST_FORWARD_CONTROL = "20261127"',
+              'CADENCE = 84',
+              'heavy_freeze_required',
+              'calendar gate only; same-day DB actual trading sessions',
+          ):
+              assert token in d, token
+
+          for token in (
+              "cron: '20 22,23 * * 1-5'",
+              "timezone: 'Asia/Seoul'",
+              "cron: '17 4 1 * *'",
+              'gh issue comment 18',
+              'retention-days: 90',
+              'same-day retry before subsequent returns is allowed',
+              'scripts/check_forward_etf_shadow_due.py',
+              'scripts/build_forward_research_db.py',
+              'scripts/run_forward_etf_shadow.py',
+          ):
+              assert token in sched, token
+
+          # Completed retrospective studies are manual-only. The common portable
+          # smoke remains automatic, but only for relevant core-file changes.
+          assert 'pull_request:' not in fixed
+          assert 'pull_request:' not in safe
+          assert 'pull_request:\n    paths:' in portable
+
+          dates = [str(x) for x in proof['signal_dates']]
+          digest = hashlib.sha256(('\n'.join(dates) + '\n').encode()).hexdigest()
+          assert len(dates) == 24
+          assert dates[0] == '20180102'
+          assert dates[-1] == '20251117'
+          assert proof['cadence_trading_sessions'] == 84
+          assert digest == 'dc5c6a140550a663f9349e27ead727ab0f3e6f5121e008a4b45c4c69223b15e4'
+          assert proof['unique_signal_dates_sha256'] == digest
+          print('forward_ops_frozen_guard=PASS')
+          PY

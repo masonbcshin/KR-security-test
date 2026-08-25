@@ -1,0 +1,10 @@
+.cache/
+outputs/
+work/
+vendor/
+*.db
+*.sqlite
+*.parquet
+__pycache__/
+.pytest_cache/
+.venv/

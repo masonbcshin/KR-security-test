@@ -1,0 +1,66 @@
+name: Personal-quant latest data audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached full research DB
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Require full DB cache hit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
+          test -s work/krx_stock_data.db
+
+      - name: Inspect latest market and financial availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs
+          python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          db='work/krx_stock_data.db'
+          with sqlite3.connect(db) as con:
+              q=lambda sql: con.execute(sql).fetchone()
+              market=q("SELECT MIN(date), MAX(date), COUNT(*) FROM daily_prices")
+              current=q("SELECT COUNT(*), COUNT(DISTINCT stock_code) FROM daily_prices WHERE date=(SELECT MAX(date) FROM daily_prices)")
+              adj=q("SELECT MIN(date), MAX(date), COUNT(*) FROM adj_daily_prices")
+              fin=q("SELECT MIN(REPLACE(available_date,'-','')), MAX(REPLACE(available_date,'-','')), COUNT(*) FROM financial_periods")
+              recent=q("SELECT MIN(date),MAX(date),COUNT(DISTINCT date) FROM daily_prices WHERE date>='20260101'")
+              result={
+                  'daily_prices':{'min_date':market[0],'max_date':market[1],'rows':market[2]},
+                  'latest_day':{'rows':current[0],'stocks':current[1]},
+                  'adjusted_prices':{'min_date':adj[0],'max_date':adj[1],'rows':adj[2]},
+                  'financial_available':{'min_date':fin[0],'max_date':fin[1],'periods':fin[2]},
+                  '2026_market_calendar':{'min_date':recent[0],'max_date':recent[1],'trading_dates':recent[2]},
+              }
+          p=Path('outputs/latest_data_audit.json')
+          p.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-personal-quant-latest-data-audit
+          path: outputs/latest_data_audit.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,94 @@
+name: ETF proxy data audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore cached full research DB
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krx_stock_data.db
+          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
+
+      - name: Require full DB cache hit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
+          test -s work/krx_stock_data.db
+
+      - name: Audit candidate ETF history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs
+          python - <<'PY'
+          import csv
+          import sqlite3
+          from pathlib import Path
+
+          db = 'work/krx_stock_data.db'
+          candidates = {
+              '069500': 'KODEX 200',
+              '226490': 'KODEX KOSPI',
+              '229200': 'KODEX KOSDAQ150',
+          }
+          rows = []
+          with sqlite3.connect(db) as con:
+              for code, label in candidates.items():
+                  r = con.execute('''
+                      SELECT COUNT(*), MIN(date), MAX(date),
+                             SUM(CASE WHEN closing_price IS NULL OR closing_price <= 0 THEN 1 ELSE 0 END),
+                             SUM(CASE WHEN value IS NULL OR value <= 0 THEN 1 ELSE 0 END)
+                      FROM daily_prices WHERE stock_code=?
+                  ''', (code,)).fetchone()
+                  ar = con.execute('SELECT COUNT(*), MIN(date), MAX(date) FROM adj_daily_prices WHERE stock_code=?', (code,)).fetchone()
+                  in_test = con.execute('SELECT COUNT(*), MIN(date), MAX(date) FROM daily_prices WHERE stock_code=? AND date BETWEEN ? AND ?', (code, '20180101', '20260320')).fetchone()
+                  rows.append({
+                      'stock_code': code,
+                      'label': label,
+                      'daily_rows': r[0],
+                      'date_min': r[1],
+                      'date_max': r[2],
+                      'bad_close_rows': r[3] or 0,
+                      'nontradable_value_rows': r[4] or 0,
+                      'adj_rows': ar[0],
+                      'adj_date_min': ar[1],
+                      'adj_date_max': ar[2],
+                      'test_rows': in_test[0],
+                      'test_date_min': in_test[1],
+                      'test_date_max': in_test[2],
+                  })
+          out = Path('outputs/etf_proxy_data_audit.csv')
+          with out.open('w', newline='', encoding='utf-8-sig') as f:
+              w = csv.DictWriter(f, fieldnames=rows[0].keys())
+              w.writeheader(); w.writerows(rows)
+          print(out.read_text(encoding='utf-8-sig'))
+          if any(r['test_rows'] == 0 or r['test_date_min'] > '20180102' or r['test_date_max'] < '20260320' for r in rows):
+              raise SystemExit('one or more ETF candidates lack full test-window coverage in cached DB')
+          PY
+
+      - name: Upload audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-proxy-data-audit
+          path: outputs/etf_proxy_data_audit.csv
+          if-no-files-found: warn
+          retention-days: 14

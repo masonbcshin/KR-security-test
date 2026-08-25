@@ -1,0 +1,81 @@
+name: ETF price source snapshot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned price reader
+        run: pip install finance-datareader==0.9.201 pandas
+
+      - name: Fetch and audit ETF prices
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/etf_prices
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          import FinanceDataReader as fdr
+
+          out = Path('outputs/etf_prices')
+          meta = {
+              '069500': 'KODEX 200',
+              '226490': 'KODEX KOSPI',
+              '229200': 'KODEX KOSDAQ150',
+          }
+          audit = []
+          for code, label in meta.items():
+              x = fdr.DataReader(f'NAVER:{code}', '2017-12-01', '2026-03-20').copy().reset_index()
+              if x.empty:
+                  raise SystemExit(f'empty ETF series: {code}')
+              if 'Date' not in x.columns:
+                  x = x.rename(columns={x.columns[0]: 'Date'})
+              x['date'] = pd.to_datetime(x['Date'], errors='coerce').dt.strftime('%Y%m%d')
+              for c in ['Open','High','Low','Close','Volume']:
+                  x[c] = pd.to_numeric(x[c], errors='coerce')
+              x = x.dropna(subset=['date','Close']).sort_values('date').drop_duplicates('date')
+              x = x[['date','Open','High','Low','Close','Volume']].reset_index(drop=True)
+              move = x['Close'].pct_change().abs()
+              row = {
+                  'code': code,
+                  'label': label,
+                  'rows': int(len(x)),
+                  'date_min': str(x['date'].min()),
+                  'date_max': str(x['date'].max()),
+                  'max_abs_daily_move': float(move.max(skipna=True)),
+                  'rows_move_gt_30pct': int((move > 0.300000000001).sum()),
+                  'bad_close_rows': int((~np.isfinite(x['Close']) | (x['Close'] <= 0)).sum()),
+                  'zero_volume_rows': int((x['Volume'].fillna(0) <= 0).sum()),
+              }
+              audit.append(row)
+              x.to_csv(out / f'{code}.csv', index=False, encoding='utf-8-sig')
+          (out / 'audit.json').write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(json.dumps(audit, ensure_ascii=False, indent=2))
+          if any(r['date_min'] > '20180102' or r['date_max'] < '20260320' for r in audit):
+              raise SystemExit('ETF price coverage gate failed')
+          if any(r['rows_move_gt_30pct'] > 0 or r['bad_close_rows'] > 0 for r in audit):
+              raise SystemExit('ETF price integrity gate failed')
+          PY
+
+      - name: Upload ETF price snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-etf-price-snapshot
+          path: outputs/etf_prices/*
+          if-no-files-found: error
+          retention-days: 14
