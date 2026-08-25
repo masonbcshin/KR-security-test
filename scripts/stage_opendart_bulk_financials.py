@@ -17,13 +17,13 @@ import json
 import re
 import zipfile
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote
 
 import requests
 
 MAIN_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/main.do"
 LIST_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/list.do"
-DOWNLOAD_BASE = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do?fl_nm="
+DOWNLOAD_ENDPOINT = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do"
+DOWNLOAD_BASE = DOWNLOAD_ENDPOINT + "?fl_nm="
 USER_AGENT = "KR-security-test/1.0 OpenDART bulk-financial staging"
 TIMEOUT = 60
 ROLES = ("BS", "PL", "CF", "CE")
@@ -64,9 +64,7 @@ def safe_member(name: str) -> bool:
 
 
 def select_inventory(discovery: dict, year: int, quarter: int):
-    pattern = re.compile(
-        rf"^{year}_{quarter}Q_(BS|PL|CF|CE)_(\d{{14}})\.zip$"
-    )
+    pattern = re.compile(rf"^{year}_{quarter}Q_(BS|PL|CF|CE)_(\d{{14}})\.zip$")
     matches = []
     for row in discovery.get("inventory_records", []):
         filename = str(row.get("file_name") or "")
@@ -89,12 +87,31 @@ def select_inventory(discovery: dict, year: int, quarter: int):
     doc_codes = {str(r.get("document_code")) for r in selected}
     if len(doc_codes) != 1:
         raise RuntimeError(f"mixed document codes: {doc_codes}")
-    expected_doc = {1: "FQ", 2: "HY", 3: "FQ", 4: "AR"}.get(quarter)
-    # OpenDART currently uses FQ for both Q1/Q3, HY for half-year and AR for annual.
-    # If the site changes codes, fail closed and inspect rather than silently proceed.
+    expected_doc = {1: "FQ", 2: "HY", 3: "TQ", 4: "FY"}.get(quarter)
     if expected_doc and doc_codes != {expected_doc}:
         raise RuntimeError(f"unexpected document code for {quarter}Q: {doc_codes} != {expected_doc}")
     return selected
+
+
+def response_diagnostic(response: requests.Response, filename: str):
+    raw = response.content
+    encoding = response.encoding or response.apparent_encoding or "utf-8"
+    try:
+        preview = raw[:800].decode(encoding, errors="replace")
+    except LookupError:
+        preview = raw[:800].decode("utf-8", errors="replace")
+    preview = re.sub(r"\s+", " ", preview).strip()
+    return {
+        "file_name": filename,
+        "status_code": int(response.status_code),
+        "final_url": response.url,
+        "content_type": response.headers.get("Content-Type"),
+        "content_disposition": response.headers.get("Content-Disposition"),
+        "content_length_header": response.headers.get("Content-Length"),
+        "response_bytes": len(raw),
+        "first_16_hex": raw[:16].hex(),
+        "text_preview": preview[:800],
+    }
 
 
 def validate_zip(path: Path, role: str):
@@ -138,14 +155,11 @@ def validate_zip(path: Path, role: str):
                 "column_count": len(cols),
             })
 
-        # Role-specific sanity: current OpenDART files put the statement number in
-        # member names. This is diagnostic, not used to parse amounts.
-        member_names = [i.filename for i in txt_infos]
         return {
             "member_count": len(infos),
             "txt_member_count": len(txt_infos),
             "uncompressed_bytes": total_uncompressed,
-            "member_names": member_names,
+            "member_names": [i.filename for i in txt_infos],
             "headers": headers,
             "role": role,
         }
@@ -161,15 +175,17 @@ def main():
     selected = select_inventory(discovery, a.year, a.quarter)
     out = Path(a.output)
     zip_dir = out / "raw_financial"
+    diag_dir = out / "download_diagnostics"
     zip_dir.mkdir(parents=True, exist_ok=True)
+    diag_dir.mkdir(parents=True, exist_ok=True)
 
     session = requests.Session()
     session.headers.update({
         "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
-        "Referer": MAIN_URL,
+        "Referer": LIST_URL,
     })
-    # Establish the same first-party session path used by the public page.
     session.get(MAIN_URL, timeout=TIMEOUT).raise_for_status()
     session.get(LIST_URL, timeout=TIMEOUT).raise_for_status()
 
@@ -177,9 +193,24 @@ def main():
     for row in selected:
         filename = row["file_name"]
         role = row["role"]
-        url = DOWNLOAD_BASE + quote(filename, safe="/._-")
-        response = session.get(url, timeout=TIMEOUT, allow_redirects=True)
+        response = session.get(
+            DOWNLOAD_ENDPOINT,
+            params={"fl_nm": filename},
+            timeout=TIMEOUT,
+            allow_redirects=True,
+            headers={"Referer": LIST_URL},
+        )
         response.raise_for_status()
+        diagnostic = response_diagnostic(response, filename)
+        (diag_dir / f"{role}.json").write_text(
+            json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        if response.content[:4] != b"PK\x03\x04":
+            raise RuntimeError(
+                "OpenDART download returned non-ZIP response: "
+                + json.dumps(diagnostic, ensure_ascii=False)
+            )
+
         target = zip_dir / filename
         target.write_bytes(response.content)
         audit = validate_zip(target, role)
@@ -191,7 +222,7 @@ def main():
             "file_name": filename,
             "inventory_timestamp": row["timestamp"],
             "source_row_text": row.get("row_text"),
-            "download_url": url,
+            "download_url": response.url,
             "http_status": int(response.status_code),
             "content_type": response.headers.get("Content-Type"),
             "compressed_bytes": int(target.stat().st_size),
@@ -210,10 +241,7 @@ def main():
         "quarter": a.quarter,
         "roles": list(ROLES),
         "files": manifest_rows,
-        "safety": {
-            "mutates_database": False,
-            "writes_only_staging_directory": True,
-        },
+        "safety": {"mutates_database": False, "writes_only_staging_directory": True},
     }
     (out / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
