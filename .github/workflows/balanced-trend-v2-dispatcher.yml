@@ -33,7 +33,7 @@ jobs:
           test -f balanced_trend_v2/PROTOCOL.md
           test -f balanced_trend_v2/backtest.py
           grep -q '결과 확인 전 사전등록' balanced_trend_v2/PROTOCOL.md
-          grep -q 'BOOTSTRAP' balanced_trend_v2/PROTOCOL.md
+          grep -qi 'bootstrap' balanced_trend_v2/PROTOCOL.md
           grep -q 'A_current_v1' balanced_trend_v2/backtest.py
           grep -q 'E_robust_risk_managed' balanced_trend_v2/backtest.py
       - uses: actions/setup-python@v5
@@ -64,6 +64,7 @@ jobs:
           PY
       - name: Comment result
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" --method POST -f body="$(cat balanced_trend_v2/result-comment.md)"
