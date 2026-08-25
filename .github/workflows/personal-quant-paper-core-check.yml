@@ -23,74 +23,44 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install pure execution dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy finance-datareader==0.9.201
-
       - name: Syntax check
         run: |
-          python -m py_compile \
-            scripts/generate_personal_quant_etf_orders.py \
-            scripts/run_personal_quant_paper_core.py
-
+          python -m py_compile scripts/generate_personal_quant_etf_orders.py scripts/run_personal_quant_paper_core.py
       - name: Guard frozen PAPER Core constants
         run: |
           python - <<'PY'
           from pathlib import Path
-          p = Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8')
-          g = Path('scripts/generate_personal_quant_etf_orders.py').read_text(encoding='utf-8')
-          for token in (
-              'STRATEGY_ID = "PQ-CORE-60-40-214980-V1"',
-              'DEFENSIVE_CODE = "214980"',
-              'EQUITY_EXPOSURE = 0.60',
-              'DEFENSIVE_EXPOSURE = 0.40',
-              'INITIAL_PAPER_CAPITAL = 100_000_000.0',
-              'BUY_COST = 0.0035',
-              'SELL_COST = 0.0055',
-              'NOOP_DUPLICATE',
-              'WAITING_T1',
-              'REPLAY_BLOCKED',
-              'DATA_NOT_READY',
-          ):
+          p=Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8')
+          g=Path('scripts/generate_personal_quant_etf_orders.py').read_text(encoding='utf-8')
+          for token in ('STRATEGY_ID = "PQ-CORE-60-40-214980-V1"','DEFENSIVE_CODE = "214980"','EQUITY_EXPOSURE = 0.60','DEFENSIVE_EXPOSURE = 0.40','INITIAL_PAPER_CAPITAL = 100_000_000.0','BUY_COST = 0.0035','SELL_COST = 0.0055','NOOP_DUPLICATE','WAITING_T1','REPLAY_BLOCKED','DATA_NOT_READY'):
               assert token in p, token
-          for token in (
-              'EQUITY_EXPOSURE = 0.60',
-              'SAFE_EXPOSURE = 0.40',
-              '"safe": "214980"',
-              'HORIZON = 84',
-              'MAX_FINANCIAL_STALENESS_DAYS = 180',
-          ):
+          for token in ('EQUITY_EXPOSURE = 0.60','SAFE_EXPOSURE = 0.40','"safe": "214980"','HORIZON = 84','MAX_FINANCIAL_STALENESS_DAYS = 180'):
               assert token in g, token
           print('paper_core_frozen_guard=PASS')
           PY
-
       - name: Guard no brokerage/network submission dependency
         run: |
           python - <<'PY'
           import ast
           from pathlib import Path
-          tree = ast.parse(Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8'))
-          roots = set()
+          tree=ast.parse(Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8'))
+          roots=set()
           for node in ast.walk(tree):
-              if isinstance(node, ast.Import):
-                  roots.update(alias.name.split('.')[0] for alias in node.names)
-              elif isinstance(node, ast.ImportFrom) and node.module:
-                  roots.add(node.module.split('.')[0])
-          forbidden = {'requests','httpx','urllib3','socket','aiohttp'}
+              if isinstance(node,ast.Import): roots.update(alias.name.split('.')[0] for alias in node.names)
+              elif isinstance(node,ast.ImportFrom) and node.module: roots.add(node.module.split('.')[0])
+          forbidden={'requests','httpx','urllib3','socket','aiohttp'}
           assert not (roots & forbidden), roots & forbidden
           print('paper_core_no_broker_submission_dependency=PASS')
           PY
-
       - name: Run deterministic PAPER state-machine self-test
-        run: |
-          python scripts/run_personal_quant_paper_core.py --self-test | tee paper-core-self-test.log
-
+        run: python scripts/run_personal_quant_paper_core.py --self-test | tee paper-core-self-test.log
       - name: Upload self-test log
         uses: actions/upload-artifact@v4
         with:
@@ -102,158 +72,110 @@ jobs:
   financial-refresh-validation:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-
-      - name: Install refresh dependencies
+      - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install requests beautifulsoup4 pandas numpy finance-datareader==0.9.201
-
-      - name: Restore immutable v4 research DB
-        id: dbcache
-        uses: actions/cache/restore@v4
-        with:
-          path: work/krx_stock_data.db
-          key: kr-research-db-v4-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-2015-2025
-
-      - name: Require exact v4 cache and record before-state
+          pip install requests beautifulsoup4 finance-datareader==0.9.201
+      - name: Checkout pinned AlphaKRX research engine
         run: |
           set -euo pipefail
-          test "${{ steps.dbcache.outputs.cache-hit }}" = "true"
-          test -s work/krx_stock_data.db
-          mkdir -p outputs/financial_refresh
+          mkdir -p work
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git work/AlphaKRX
+          git -C work/AlphaKRX sparse-checkout init --cone
+          git -C work/AlphaKRX sparse-checkout set etl ml data/raw_financial
+          git -C work/AlphaKRX fetch --depth=1 origin "$ALPHAKRX_SHA"
+          git -C work/AlphaKRX checkout --detach FETCH_HEAD
+          test "$(git -C work/AlphaKRX rev-parse HEAD)" = "$ALPHAKRX_SHA"
+      - name: Cache 2022-2026 marcap parquet
+        uses: actions/cache@v4
+        with:
+          path: .cache/marcap
+          key: pq-forward-marcap-${{ runner.os }}-2022-2026
+      - name: Build sufficient 2022-2026 validation DB
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/financial_refresh work
+          python scripts/build_marcap_db_ci.py --phase prices --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/prices.log
+          python scripts/build_marcap_db_ci.py --phase financial --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 --financial-start-year 2022 --financial-end-year 2025 | tee outputs/financial_refresh/financial_base.log
+          python scripts/build_marcap_db_ci.py --phase adjusted --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/adjusted.log
+          python scripts/build_marcap_db_ci.py --phase audit --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --start-year 2022 --end-year 2026 | tee outputs/financial_refresh/base_audit.log
+      - name: Record base DB state
+        run: |
           python - <<'PY'
-          import json, sqlite3
+          import json,sqlite3
           from pathlib import Path
-          with sqlite3.connect('work/krx_stock_data.db') as con:
-              x={
-                'daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM daily_prices').fetchone(),
-                'adj_daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM adj_daily_prices').fetchone(),
-                'financial_periods':con.execute("SELECT COUNT(*),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone(),
-                'financial_bs_cf':con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0],
-                'financial_pl':con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0],
-              }
+          with sqlite3.connect('work/krx_stock_data_forward.db') as con:
+              x={'daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM daily_prices').fetchone(),'adj_daily_prices':con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM adj_daily_prices').fetchone(),'financial_periods':con.execute("SELECT COUNT(*),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone(),'financial_bs_cf':con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0],'financial_pl':con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]}
           Path('outputs/financial_refresh/base_before.json').write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(x,ensure_ascii=False,indent=2))
           PY
-          cp --reflink=auto work/krx_stock_data.db work/krx_stock_data_v5.db
-          test -s work/krx_stock_data_v5.db
-
       - name: Discover and stage official 2026Q2 OpenDART files
         run: |
           set -euo pipefail
           python scripts/discover_opendart_bulk_financials.py --output outputs/opendart_discovery
-          python scripts/stage_opendart_bulk_financials.py \
-            --discovery-json outputs/opendart_discovery/discovery.json \
-            --year 2026 --quarter 2 \
-            --output outputs/opendart_2026q2
-
-      - name: Checkout pinned AlphaKRX
-        run: |
-          set -euo pipefail
-          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git work/AlphaKRX
-          git -C work/AlphaKRX checkout "$ALPHAKRX_SHA"
-          test "$(git -C work/AlphaKRX rev-parse HEAD)" = "$ALPHAKRX_SHA"
-
-      - name: Import staged BS PL CF into DB copy
+          python scripts/stage_opendart_bulk_financials.py --discovery-json outputs/opendart_discovery/discovery.json --year 2026 --quarter 2 --output outputs/opendart_2026q2
+      - name: Import staged 2026Q2 into validation DB
         env:
           PYTHONPATH: work/AlphaKRX
         run: |
-          set -euo pipefail
           python - <<'PY'
-          import json, sys
+          import json,sys
           from pathlib import Path
           sys.path.insert(0,'work/AlphaKRX')
           from etl.financial_etl import FinancialDataLoader
-          loader=FinancialDataLoader('work/krx_stock_data_v5.db','outputs/opendart_2026q2/raw_financial')
+          loader=FinancialDataLoader('work/krx_stock_data_forward.db','outputs/opendart_2026q2/raw_financial')
           loader.connect()
           try:
-              loader.create_tables()
-              stats=loader.process_all('2026_2Q_*.zip')
-          finally:
-              loader.close()
-          if stats.get('errors') != 0:
-              raise SystemExit(stats)
+              loader.create_tables(); stats=loader.process_all('2026_2Q_*.zip')
+          finally: loader.close()
+          if stats.get('errors')!=0: raise SystemExit(stats)
           Path('outputs/financial_refresh/import_stats.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(stats,ensure_ascii=False,indent=2))
           PY
-
-      - name: Audit refreshed DB copy and fail closed
+      - name: Audit refreshed validation DB
         run: |
-          set -euo pipefail
           python - <<'PY'
-          import json, sqlite3
+          import json,sqlite3
           from pathlib import Path
           before=json.loads(Path('outputs/financial_refresh/base_before.json').read_text(encoding='utf-8'))
-          with sqlite3.connect('work/krx_stock_data_v5.db') as con:
-              daily=con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM daily_prices').fetchone()
-              adj=con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM adj_daily_prices').fetchone()
-              fin=con.execute("SELECT COUNT(*),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone()
-              bs_cf=con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0]
-              pl=con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]
-              q2=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_date='2026-06-30'").fetchone()[0]
-              std=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')='20260816'").fetchone()[0]
-              std_bad=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')<>'20260816'").fetchone()[0]
-              dup=con.execute("SELECT COUNT(*) FROM (SELECT stock_code,fiscal_date,consolidation_type,COUNT(*) c FROM financial_periods GROUP BY stock_code,fiscal_date,consolidation_type HAVING c>1)").fetchone()[0]
-              integrity=con.execute('PRAGMA integrity_check').fetchone()[0]
+          with sqlite3.connect('work/krx_stock_data_forward.db') as con:
+              daily=con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM daily_prices').fetchone(); adj=con.execute('SELECT MIN(date),MAX(date),COUNT(*) FROM adj_daily_prices').fetchone(); fin=con.execute("SELECT COUNT(*),MIN(REPLACE(available_date,'-','')),MAX(REPLACE(available_date,'-','')) FROM financial_periods").fetchone(); bs_cf=con.execute('SELECT COUNT(*) FROM financial_items_bs_cf').fetchone()[0]; pl=con.execute('SELECT COUNT(*) FROM financial_items_pl').fetchone()[0]; q2=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_date='2026-06-30'").fetchone()[0]; std=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')='20260816'").fetchone()[0]; std_bad=con.execute("SELECT COUNT(*) FROM financial_periods WHERE fiscal_month=12 AND fiscal_date='2026-06-30' AND REPLACE(available_date,'-','')<>'20260816'").fetchone()[0]; dup=con.execute("SELECT COUNT(*) FROM (SELECT stock_code,fiscal_date,consolidation_type,COUNT(*) c FROM financial_periods GROUP BY stock_code,fiscal_date,consolidation_type HAVING c>1)").fetchone()[0]; integrity=con.execute('PRAGMA integrity_check').fetchone()[0]
           audit={'daily_prices':daily,'adj_daily_prices':adj,'financial_periods':fin,'financial_bs_cf':bs_cf,'financial_pl':pl,'q2_periods':q2,'standard_dec_fy_2026q2_available_20260816':std,'standard_dec_fy_2026q2_wrong_available_date':std_bad,'duplicate_period_keys':dup,'sqlite_integrity_check':integrity}
-          if list(daily)!=list(before['daily_prices']) or list(adj)!=list(before['adj_daily_prices']):
-              raise SystemExit(f'market layer changed: before={before} after={audit}')
-          if fin[2]!='20260816' or q2<4800 or std<4700 or std_bad!=0:
-              raise SystemExit(f'PIT refresh failed: {audit}')
-          if fin[0]<=before['financial_periods'][0] or bs_cf<=before['financial_bs_cf'] or pl<=before['financial_pl']:
-              raise SystemExit(f'financial counts did not increase: before={before} after={audit}')
-          if dup!=0 or integrity!='ok':
-              raise SystemExit(f'DB integrity failed: {audit}')
+          if list(daily)!=list(before['daily_prices']) or list(adj)!=list(before['adj_daily_prices']): raise SystemExit(f'market layer changed: {audit}')
+          if fin[2]!='20260816' or q2<4800 or std<4700 or std_bad!=0: raise SystemExit(f'PIT refresh failed: {audit}')
+          if fin[0]<=before['financial_periods'][0] or bs_cf<=before['financial_bs_cf'] or pl<=before['financial_pl']: raise SystemExit(f'financial counts did not increase: {audit}')
+          if dup!=0 or integrity!='ok': raise SystemExit(f'DB integrity failed: {audit}')
           Path('outputs/financial_refresh/refreshed_db_audit.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(audit,ensure_ascii=False,indent=2))
           PY
-
       - name: Generate 60/40 targets from refreshed DB
         run: |
           set -euo pipefail
-          python scripts/generate_personal_quant_etf_orders.py \
-            --alphakrx-root work/AlphaKRX \
-            --db work/krx_stock_data_v5.db \
-            --output outputs/refreshed_live \
-            --capitals 10000000,30000000,100000000 | tee outputs/financial_refresh/live_target.log
-
-      - name: Require refreshed DATA_READY and fixed strategy identity
+          python scripts/generate_personal_quant_etf_orders.py --alphakrx-root work/AlphaKRX --db work/krx_stock_data_forward.db --output outputs/refreshed_live --capitals 10000000,30000000,100000000 | tee outputs/financial_refresh/live_target.log
+      - name: Require DATA_READY and fixed strategy identity
         run: |
-          set -euo pipefail
           python - <<'PY'
           import json
           from pathlib import Path
           x=json.loads(Path('outputs/refreshed_live/live_status.json').read_text(encoding='utf-8'))
-          assert x['strategy_id']=='PQ-CORE-60-40-214980-V1', x
-          assert abs(float(x['equity_exposure'])-0.60)<1e-12, x
-          assert abs(float(x['defensive_exposure'])-0.40)<1e-12, x
-          assert x['defensive_code']=='214980', x
-          assert int(x['horizon_trading_days'])==84, x
-          assert x['latest_financial_available_date']=='20260816', x
-          assert x['financial_fresh'] is True, x
-          assert x['DATA_READY'] is True and x['LIVE_READY'] is True, x
-          assert x['blocking_reason'] is None, x
+          assert x['strategy_id']=='PQ-CORE-60-40-214980-V1',x
+          assert abs(float(x['equity_exposure'])-.60)<1e-12 and abs(float(x['defensive_exposure'])-.40)<1e-12,x
+          assert x['defensive_code']=='214980' and int(x['horizon_trading_days'])==84,x
+          assert x['latest_financial_available_date']=='20260816' and x['financial_fresh'] is True,x
+          assert x['DATA_READY'] is True and x['LIVE_READY'] is True and x['blocking_reason'] is None,x
           print(json.dumps(x,ensure_ascii=False,indent=2))
           PY
-
-      - name: Save validated v5 cache for PR continuity
-        uses: actions/cache/save@v4
-        with:
-          path: work/krx_stock_data_v5.db
-          key: kr-research-db-v5-${{ env.ALPHAKRX_SHA }}-${{ hashFiles('scripts/build_marcap_db.py', 'scripts/build_marcap_db_ci.py') }}-2011-2026-opendart-2026q2
-
       - name: Upload financial refresh validation
         if: always()
         uses: actions/upload-artifact@v4
