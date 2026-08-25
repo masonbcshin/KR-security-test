@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import re
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -28,7 +29,10 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
-TIMEOUT = 60
+PAGE_TIMEOUT = (15, 60)
+DOWNLOAD_TIMEOUT = (20, 120)
+MAX_DOWNLOAD_ATTEMPTS = 4
+BACKOFF_SECONDS = (0, 5, 15, 30)
 ROLES = ("BS", "PL", "CF", "CE")
 EXPECTED_HEADER_MARKERS = (
     "재무제표종류",
@@ -168,6 +172,101 @@ def validate_zip(path: Path, role: str):
         }
 
 
+def make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": MAIN_URL,
+        "Connection": "close",
+    })
+    session.get(MAIN_URL, timeout=PAGE_TIMEOUT).raise_for_status()
+    session.get(
+        LIST_URL,
+        timeout=PAGE_TIMEOUT,
+        headers={
+            "Referer": MAIN_URL,
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Connection": "close",
+        },
+    ).raise_for_status()
+    return session
+
+
+def download_with_retries(filename: str, role: str, diag_dir: Path) -> requests.Response:
+    navigation_headers = {
+        "Referer": MAIN_URL,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "close",
+    }
+    attempts = []
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+        delay = BACKOFF_SECONDS[attempt - 1]
+        if delay:
+            time.sleep(delay)
+        session = None
+        try:
+            session = make_session()
+            response = session.get(
+                DOWNLOAD_ENDPOINT,
+                params={"fl_nm": filename},
+                timeout=DOWNLOAD_TIMEOUT,
+                allow_redirects=True,
+                headers=navigation_headers,
+            )
+            response.raise_for_status()
+            diagnostic = response_diagnostic(response, filename)
+            diagnostic["attempt"] = attempt
+            attempts.append(diagnostic)
+            (diag_dir / f"{role}-attempt-{attempt}.json").write_text(
+                json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if response.content[:4] == b"PK\x03\x04":
+                (diag_dir / f"{role}.json").write_text(
+                    json.dumps({"status": "SUCCESS", "attempts": attempts}, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                return response
+            last_exc = RuntimeError(
+                "OpenDART download returned non-ZIP response: "
+                + json.dumps(diagnostic, ensure_ascii=False)
+            )
+        except requests.RequestException as exc:
+            last_exc = exc
+            diagnostic = {
+                "file_name": filename,
+                "attempt": attempt,
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+            }
+            attempts.append(diagnostic)
+            (diag_dir / f"{role}-attempt-{attempt}.json").write_text(
+                json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        finally:
+            if session is not None:
+                session.close()
+
+    (diag_dir / f"{role}.json").write_text(
+        json.dumps({"status": "FAILED", "attempts": attempts}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    raise RuntimeError(
+        f"OpenDART download failed after {MAX_DOWNLOAD_ATTEMPTS} attempts for {filename}: {last_exc}"
+    )
+
+
 def main():
     a = parse_args()
     discovery_path = Path(a.discovery_json)
@@ -182,57 +281,11 @@ def main():
     zip_dir.mkdir(parents=True, exist_ok=True)
     diag_dir.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": MAIN_URL,
-    })
-    session.get(MAIN_URL, timeout=TIMEOUT).raise_for_status()
-    session.get(
-        LIST_URL,
-        timeout=TIMEOUT,
-        headers={
-            "Referer": MAIN_URL,
-            "X-Requested-With": "XMLHttpRequest",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-        },
-    ).raise_for_status()
-
-    navigation_headers = {
-        "Referer": MAIN_URL,
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-User": "?1",
-        "Sec-Fetch-Dest": "document",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
     manifest_rows = []
     for row in selected:
         filename = row["file_name"]
         role = row["role"]
-        response = session.get(
-            DOWNLOAD_ENDPOINT,
-            params={"fl_nm": filename},
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            headers=navigation_headers,
-        )
-        response.raise_for_status()
-        diagnostic = response_diagnostic(response, filename)
-        (diag_dir / f"{role}.json").write_text(
-            json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        if response.content[:4] != b"PK\x03\x04":
-            raise RuntimeError(
-                "OpenDART download returned non-ZIP response: "
-                + json.dumps(diagnostic, ensure_ascii=False)
-            )
-
+        response = download_with_retries(filename, role, diag_dir)
         target = zip_dir / filename
         target.write_bytes(response.content)
         audit = validate_zip(target, role)
