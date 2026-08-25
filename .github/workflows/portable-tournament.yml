@@ -2,6 +2,13 @@ name: Portable KR strategy tournament
 
 on:
   pull_request:
+    paths:
+      - requirements.txt
+      - scripts/build_marcap_db.py
+      - scripts/build_marcap_db_ci.py
+      - scripts/run_portable_tournament.py
+      - scripts/run_portable_tournament_ci.py
+      - .github/workflows/portable-tournament.yml
   workflow_dispatch:
     inputs:
       tier:

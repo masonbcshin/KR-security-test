@@ -1,12 +1,6 @@
 name: ETF safe-sleeve implementation study
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
-    paths:
-      - scripts/run_etf_safe_sleeve_study.py
-      - .github/workflows/etf-safe-sleeve-study.yml
   workflow_dispatch:
 
 permissions:
@@ -15,7 +9,6 @@ permissions:
 
 jobs:
   safe-sleeve:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
