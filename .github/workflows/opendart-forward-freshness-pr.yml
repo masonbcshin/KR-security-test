@@ -67,6 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p outputs
           SIGNAL_DATE="$(TZ=Asia/Seoul date +%Y%m%d)"
           echo "signal_date=$SIGNAL_DATE" >> "$GITHUB_OUTPUT"
           python scripts/prepare_forward_financial_snapshot.py \
