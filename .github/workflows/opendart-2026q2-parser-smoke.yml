@@ -43,7 +43,7 @@ jobs:
           for token in (
               'ROLES = ("BS", "PL", "CF", "CE")',
               'mutates_database": False',
-              '2026',
+              'DOWNLOAD_BASE = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do?fl_nm="',
           ):
               assert token in p, token
           assert 'sqlite3' not in p
