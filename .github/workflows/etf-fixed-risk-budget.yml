@@ -1,10 +1,6 @@
 name: ETF fixed risk-budget study
 
 on:
-  pull_request:
-    paths:
-      - scripts/run_etf_fixed_risk_budget.py
-      - .github/workflows/etf-fixed-risk-budget.yml
   workflow_dispatch:
 
 permissions:

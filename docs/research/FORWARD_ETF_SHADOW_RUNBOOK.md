@@ -159,3 +159,36 @@ Freeze the new market-split weights and the latest completed 10M state for deter
 - `FORWARD_EVENT_FROZEN`: event primitives and provenance were persisted before subsequent returns.
 
 Do not convert `DATA_NOT_READY`, `REPLAY_BLOCKED`, or a missed run into a reconstructed signal after seeing later returns.
+
+## 7. GitHub Actions automation
+
+The production scheduler is `.github/workflows/forward-etf-shadow-scheduled.yml` and becomes active only after it exists on the repository default branch.
+
+### Daily lightweight gate
+
+On KRX weekdays it runs at **22:20 and 23:20 Asia/Seoul**. `scripts/check_forward_etf_shadow_due.py` uses only the frozen KRX calendar and accepted cadence proof to decide whether a heavy same-day freeze may be required.
+
+- normal non-event days stop after the lightweight gate;
+- event days build the PIT DB and invoke `run_forward_etf_shadow.py`;
+- the second same-day run checks issue #18 and becomes a no-op if the first run already persisted `FORWARD_EVENT_FROZEN`;
+- if the first attempt fails because data are not ready, a second **same-day** attempt is allowed before subsequent returns;
+- a later-date replay remains forbidden and is rejected by the market-snapshot guard.
+
+The calendar gate is not authoritative for the 84d cadence. The same-day DB's actual trading dates and the frozen runner are authoritative before a control event is accepted.
+
+### Durable ledger
+
+A successful event writes the signal Markdown, canonical signal JSON, preflight provenance, hashes, and GitHub run reference to issue #18. Artifacts are also retained for 90 days, but the issue ledger is the durable record.
+
+A failed due-date run writes an explicit failure record to issue #18 so that a missing signal cannot later be silently reconstructed.
+
+### Public-repository scheduler keepalive
+
+GitHub may automatically disable scheduled workflows in a public repository after 60 days without repository activity. The scheduler therefore runs a **monthly 04:17 Asia/Seoul heartbeat** that updates `docs/research/forward-scheduler-heartbeat.txt` with a `[skip ci]` commit. This creates repository activity without changing research code or strategy state.
+
+Official GitHub references:
+
+- https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows
+- https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+
+The heartbeat is operational infrastructure only. It is not a forward observation and does not alter the implementation rules, benchmark, challenger, or evaluation gates.

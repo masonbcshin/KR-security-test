@@ -1,0 +1,335 @@
+name: Forward ETF shadow scheduled freeze
+
+on:
+  schedule:
+    # Two same-day attempts after KRX close. The second run is a no-op if the
+    # first already froze the event in issue #18.
+    - cron: '20 22,23 * * 1-5'
+      timezone: 'Asia/Seoul'
+    # Public repositories can have schedules disabled after 60 days without
+    # repository activity. A monthly heartbeat keeps this long-horizon study live.
+    - cron: '17 4 1 * *'
+      timezone: 'Asia/Seoul'
+  workflow_dispatch:
+    inputs:
+      signal_date:
+        description: 'Same-day YYYYMMDD only; later replay remains blocked by the DB guard'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: forward-etf-shadow-scheduled
+  cancel-in-progress: false
+
+env:
+  METHOD_ALPHAKRX_SHA: e773d4243b7a644dd0c525daccebdf062bc389a1
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  keepalive:
+    if: github.event_name == 'schedule' && github.event.schedule == '17 4 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Record monthly scheduler heartbeat
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/research
+          NOW="$(TZ=Asia/Seoul date --iso-8601=seconds)"
+          printf 'Forward scheduler heartbeat: %s\n' "$NOW" > docs/research/forward-scheduler-heartbeat.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/research/forward-scheduler-heartbeat.txt
+          git commit -m 'chore: keep forward scheduler active [skip ci]'
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
+
+  precheck:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule != '17 4 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      signal_date: ${{ steps.gate.outputs.signal_date }}
+      event_types: ${{ steps.gate.outputs.event_types }}
+      price_start_year: ${{ steps.gate.outputs.price_start_year }}
+      run_freeze: ${{ steps.duplicate.outputs.run_freeze }}
+      duplicate: ${{ steps.duplicate.outputs.duplicate }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Resolve Seoul signal date and lightweight due gate
+        id: gate
+        shell: bash
+        env:
+          INPUT_SIGNAL_DATE: ${{ inputs.signal_date }}
+        run: |
+          set -euo pipefail
+          SIGNAL_DATE="${INPUT_SIGNAL_DATE:-}"
+          if [[ -z "$SIGNAL_DATE" ]]; then
+            SIGNAL_DATE="$(TZ=Asia/Seoul date +%Y%m%d)"
+          fi
+          mkdir -p outputs/forward_due
+          python scripts/check_forward_etf_shadow_due.py \
+            --date "$SIGNAL_DATE" \
+            --calendar data/krx_market_calendar_2025_2029.json \
+            > outputs/forward_due/due.json
+          cat outputs/forward_due/due.json
+          python - "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          d=json.load(open('outputs/forward_due/due.json', encoding='utf-8'))
+          with open(sys.argv[1], 'a', encoding='utf-8') as f:
+              f.write(f"signal_date={d['signal_date']}\n")
+              f.write(f"event_types={','.join(d['event_types'])}\n")
+              f.write(f"price_start_year={d['price_start_year']}\n")
+              f.write(f"due={'true' if d['heavy_freeze_required'] else 'false'}\n")
+          PY
+
+      - name: Block duplicate freezes already persisted in issue 18
+        id: duplicate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DUE: ${{ steps.gate.outputs.due }}
+          SIGNAL_DATE: ${{ steps.gate.outputs.signal_date }}
+        run: |
+          set -euo pipefail
+          if [[ "$DUE" != 'true' ]]; then
+            echo 'duplicate=false' >> "$GITHUB_OUTPUT"
+            echo 'run_freeze=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh issue view 18 --repo "$GITHUB_REPOSITORY" --json comments > outputs/forward_due/issue18.json
+          python - "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          data=json.load(open('outputs/forward_due/issue18.json', encoding='utf-8'))
+          signal=os.environ['SIGNAL_DATE']
+          marker=f"Forward ETF shadow signal — {signal}"
+          duplicate=any(
+              marker in (c.get('body') or '') and 'FORWARD_EVENT_FROZEN' in (c.get('body') or '')
+              for c in data.get('comments', [])
+          )
+          with open(sys.argv[1], 'a', encoding='utf-8') as f:
+              f.write(f"duplicate={'true' if duplicate else 'false'}\n")
+              f.write(f"run_freeze={'false' if duplicate else 'true'}\n")
+          print(f'duplicate={duplicate}')
+          PY
+
+      - name: Precheck summary
+        run: |
+          echo "### Forward due precheck" >> "$GITHUB_STEP_SUMMARY"
+          echo "- signal date: ${{ steps.gate.outputs.signal_date }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- events: ${{ steps.gate.outputs.event_types || 'none' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- duplicate: ${{ steps.duplicate.outputs.duplicate }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- heavy freeze: ${{ steps.duplicate.outputs.run_freeze }}" >> "$GITHUB_STEP_SUMMARY"
+
+  freeze:
+    needs: precheck
+    if: needs.precheck.outputs.run_freeze == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install 'finance-datareader==0.9.201'
+
+      - name: Resolve immutable same-day source SHAs
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_ALPHAKRX_SHA="$(git ls-remote https://github.com/yeonghun00/AlphaKRX.git HEAD | awk '{print $1}')"
+          MARCAP_SHA="$(git ls-remote https://github.com/FinanceData/marcap.git HEAD | awk '{print $1}')"
+          IMPLEMENTATION_SHA="$(git rev-parse HEAD)"
+          test -n "$DATA_ALPHAKRX_SHA"
+          test -n "$MARCAP_SHA"
+          echo "data_alphakrx_sha=$DATA_ALPHAKRX_SHA" >> "$GITHUB_OUTPUT"
+          echo "marcap_sha=$MARCAP_SHA" >> "$GITHUB_OUTPUT"
+          echo "implementation_sha=$IMPLEMENTATION_SHA" >> "$GITHUB_OUTPUT"
+          printf 'method=%s\ndata=%s\nmarcap=%s\nimplementation=%s\n' \
+            "$METHOD_ALPHAKRX_SHA" "$DATA_ALPHAKRX_SHA" "$MARCAP_SHA" "$IMPLEMENTATION_SHA"
+
+      - name: Checkout frozen method code and same-day raw financial snapshot
+        shell: bash
+        env:
+          DATA_ALPHAKRX_SHA: ${{ steps.source.outputs.data_alphakrx_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx-method
+          git -C vendor/alphakrx-method sparse-checkout init --cone
+          git -C vendor/alphakrx-method sparse-checkout set etl ml
+          git -C vendor/alphakrx-method fetch --depth=1 origin "$METHOD_ALPHAKRX_SHA"
+          git -C vendor/alphakrx-method checkout --detach FETCH_HEAD
+
+          git clone --filter=blob:none --no-checkout https://github.com/yeonghun00/AlphaKRX.git vendor/alphakrx-data
+          git -C vendor/alphakrx-data sparse-checkout init --cone
+          git -C vendor/alphakrx-data sparse-checkout set data/raw_financial
+          git -C vendor/alphakrx-data fetch --depth=1 origin "$DATA_ALPHAKRX_SHA"
+          git -C vendor/alphakrx-data checkout --detach FETCH_HEAD
+
+          test "$(git -C vendor/alphakrx-method rev-parse HEAD)" = "$METHOD_ALPHAKRX_SHA"
+          test "$(git -C vendor/alphakrx-data rev-parse HEAD)" = "$DATA_ALPHAKRX_SHA"
+          test -f vendor/alphakrx-method/etl/financial_etl.py
+          test -d vendor/alphakrx-data/data/raw_financial
+
+      - name: Restore same-source marcap cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/forward-marcap
+          key: forward-marcap-${{ runner.os }}-${{ steps.source.outputs.marcap_sha }}-${{ needs.precheck.outputs.price_start_year }}-${{ needs.precheck.outputs.signal_date }}
+          restore-keys: |
+            forward-marcap-${{ runner.os }}-${{ steps.source.outputs.marcap_sha }}-
+
+      - name: Build same-day PIT forward DB
+        shell: bash
+        env:
+          SIGNAL_DATE: ${{ needs.precheck.outputs.signal_date }}
+          PRICE_START_YEAR: ${{ needs.precheck.outputs.price_start_year }}
+          DATA_ALPHAKRX_SHA: ${{ steps.source.outputs.data_alphakrx_sha }}
+          MARCAP_SHA: ${{ steps.source.outputs.marcap_sha }}
+        run: |
+          set -euo pipefail
+          OUT="outputs/forward_${SIGNAL_DATE}"
+          mkdir -p "$OUT" work
+          python scripts/build_forward_research_db.py \
+            --method-alphakrx-root vendor/alphakrx-method \
+            --data-alphakrx-root vendor/alphakrx-data \
+            --method-alphakrx-sha "$METHOD_ALPHAKRX_SHA" \
+            --data-alphakrx-sha "$DATA_ALPHAKRX_SHA" \
+            --marcap-sha "$MARCAP_SHA" \
+            --signal-date "$SIGNAL_DATE" \
+            --start-year "$PRICE_START_YEAR" \
+            --financial-start-year 2015 \
+            --cache-dir .cache/forward-marcap \
+            --db "work/forward_${SIGNAL_DATE}.db" \
+            --manifest "$OUT/snapshot_manifest.json" \
+            | tee "$OUT/build_forward_db.log"
+
+      - name: Freeze authoritative forward primitive
+        shell: bash
+        env:
+          SIGNAL_DATE: ${{ needs.precheck.outputs.signal_date }}
+          IMPLEMENTATION_SHA: ${{ steps.source.outputs.implementation_sha }}
+        run: |
+          set -euo pipefail
+          OUT="outputs/forward_${SIGNAL_DATE}"
+          python scripts/check_forward_etf_shadow_due.py \
+            --date "$SIGNAL_DATE" \
+            --calendar data/krx_market_calendar_2025_2029.json \
+            > "$OUT/due.json"
+          python scripts/run_forward_etf_shadow.py \
+            --method-alphakrx-root vendor/alphakrx-method \
+            --db "work/forward_${SIGNAL_DATE}.db" \
+            --signal-date "$SIGNAL_DATE" \
+            --snapshot-manifest "$OUT/snapshot_manifest.json" \
+            --calendar data/krx_market_calendar_2025_2029.json \
+            --implementation-sha "$IMPLEMENTATION_SHA" \
+            --output "$OUT" \
+            | tee "$OUT/freeze.log"
+
+          python - <<'PY'
+          import json, os
+          d=os.environ['SIGNAL_DATE']
+          p=f'outputs/forward_{d}/signal_{d}.json'
+          x=json.load(open(p, encoding='utf-8'))
+          if x.get('status') != 'FORWARD_EVENT_FROZEN':
+              raise SystemExit(f"scheduled heavy gate disagreed with authoritative runner: {x.get('status')}")
+          print('forward_event_status_guard=PASS')
+          PY
+
+      - name: Persist canonical event to issue 18 before next session
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNAL_DATE: ${{ needs.precheck.outputs.signal_date }}
+        run: |
+          set -euo pipefail
+          OUT="outputs/forward_${SIGNAL_DATE}"
+          BODY="$OUT/issue18_comment.md"
+          cat "$OUT/signal_${SIGNAL_DATE}.md" > "$BODY"
+          {
+            echo
+            echo '<details><summary>Canonical signal JSON</summary>'
+            echo
+            echo '```json'
+            cat "$OUT/signal_${SIGNAL_DATE}.json"
+            echo '```'
+            echo '</details>'
+            echo
+            echo '<details><summary>Preflight provenance</summary>'
+            echo
+            echo '```json'
+            cat "$OUT/preflight_${SIGNAL_DATE}.json"
+            echo '```'
+            echo '</details>'
+            echo
+            echo "- GitHub run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo '- policy: same-day freeze only; no later replay/backfill after subsequent returns'
+          } >> "$BODY"
+          gh issue comment 18 --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+
+      - name: Upload forward event artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forward-etf-shadow-${{ needs.precheck.outputs.signal_date }}
+          path: outputs/forward_${{ needs.precheck.outputs.signal_date }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record failed same-day freeze without backfilling
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNAL_DATE: ${{ needs.precheck.outputs.signal_date }}
+          EVENT_TYPES: ${{ needs.precheck.outputs.event_types }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/forward_failure.md <<EOF
+          ### Forward ETF shadow same-day freeze failed — ${SIGNAL_DATE}
+
+          - RL-ID: \`RL-2026-08-22-ETF-FORWARD-001\`
+          - expected event types: **${EVENT_TYPES}**
+          - status: **DATA_NOT_READY_OR_EXECUTION_FAILURE**
+          - run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - policy: a same-day retry before subsequent returns is allowed; a later replay/backfill is forbidden.
+
+          No forward signal was frozen by this failed run.
+          EOF
+          gh issue comment 18 --repo "$GITHUB_REPOSITORY" --body-file /tmp/forward_failure.md
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forward-etf-shadow-failure-${{ needs.precheck.outputs.signal_date }}
+          path: outputs/forward_${{ needs.precheck.outputs.signal_date }}
+          if-no-files-found: warn
+          retention-days: 30
