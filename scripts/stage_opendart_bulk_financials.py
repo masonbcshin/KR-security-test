@@ -24,7 +24,10 @@ MAIN_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/main.do"
 LIST_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/list.do"
 DOWNLOAD_ENDPOINT = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do"
 DOWNLOAD_BASE = DOWNLOAD_ENDPOINT + "?fl_nm="
-USER_AGENT = "KR-security-test/1.0 OpenDART bulk-financial staging"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
 TIMEOUT = 60
 ROLES = ("BS", "PL", "CF", "CE")
 EXPECTED_HEADER_MARKERS = (
@@ -182,14 +185,31 @@ def main():
     session = requests.Session()
     session.headers.update({
         "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
-        # list.do is loaded by AJAX into main.do; browser navigation originates
-        # from the main document when download_ext002 changes window.location.
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": MAIN_URL,
     })
     session.get(MAIN_URL, timeout=TIMEOUT).raise_for_status()
-    session.get(LIST_URL, timeout=TIMEOUT, headers={"Referer": MAIN_URL}).raise_for_status()
+    session.get(
+        LIST_URL,
+        timeout=TIMEOUT,
+        headers={
+            "Referer": MAIN_URL,
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+        },
+    ).raise_for_status()
+
+    navigation_headers = {
+        "Referer": MAIN_URL,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
     manifest_rows = []
     for row in selected:
@@ -200,7 +220,7 @@ def main():
             params={"fl_nm": filename},
             timeout=TIMEOUT,
             allow_redirects=True,
-            headers={"Referer": MAIN_URL},
+            headers=navigation_headers,
         )
         response.raise_for_status()
         diagnostic = response_diagnostic(response, filename)
