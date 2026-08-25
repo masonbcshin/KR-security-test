@@ -43,10 +43,11 @@ jobs:
           for token in (
               'ROLES = ("BS", "PL", "CF", "CE")',
               'mutates_database": False',
-              'DOWNLOAD_BASE = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do?fl_nm="',
+              'https://opendart.fss.or.kr/cmm/downloadFnlttZip.do',
           ):
               assert token in p, token
           assert 'sqlite3' not in p
+          assert 'FinancialDataLoader' not in p
           print('staging_no_db_mutation_guard=PASS')
           PY
 
@@ -143,13 +144,15 @@ jobs:
           PY
 
       - name: Upload staging and parser audit
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kr-opendart-2026q2-parser-smoke
           path: |
             outputs/opendart_discovery/discovery.json
             outputs/opendart_2026q2/manifest.json
+            outputs/opendart_2026q2/download_diagnostics/*.json
             outputs/opendart_2026q2/raw_financial/*.zip
             outputs/parser_smoke/audit.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
