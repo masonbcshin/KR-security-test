@@ -13,6 +13,7 @@ import ast
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
@@ -23,9 +24,14 @@ SOURCE_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/main.do"
 LIST_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/list.do"
 DOWNLOAD_BASE = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do?fl_nm="
 EXPECTED_MARKER = "재무정보 일괄다운로드"
-USER_AGENT = "KR-security-test/1.0 OpenDART bulk-financial discovery (read-only)"
-PAGE_TIMEOUT = 20
-SCRIPT_TIMEOUT = 3
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+PAGE_TIMEOUT = (20, 60)
+SCRIPT_TIMEOUT = (3, 10)
+MAX_PAGE_ATTEMPTS = 4
+PAGE_BACKOFF_SECONDS = (0, 5, 15, 30)
 MAX_EXTERNAL_SCRIPT_ATTEMPTS = 8
 
 KEYWORDS = (
@@ -97,20 +103,59 @@ def parse_download_call(onclick: str):
     return rec
 
 
+def make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": SOURCE_URL,
+        "Connection": "close",
+    })
+    return session
+
+
+def get_with_retries(session: requests.Session, url: str, *, headers=None):
+    attempts = []
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_PAGE_ATTEMPTS + 1):
+        delay = PAGE_BACKOFF_SECONDS[attempt - 1]
+        if delay:
+            time.sleep(delay)
+        try:
+            response = session.get(url, timeout=PAGE_TIMEOUT, headers=headers)
+            response.raise_for_status()
+            return response, attempts + [{
+                "attempt": attempt,
+                "status_code": int(response.status_code),
+                "url": response.url,
+                "result": "SUCCESS",
+            }]
+        except requests.RequestException as exc:
+            last_exc = exc
+            attempts.append({
+                "attempt": attempt,
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "result": "RETRY",
+            })
+            # Recreate the TCP/TLS connection on the next attempt while keeping
+            # browser-like headers. OpenDART occasionally drops hosted-runner
+            # connections before a response is established.
+            session.close()
+            session = make_session()
+    raise RuntimeError(
+        f"OpenDART discovery failed after {MAX_PAGE_ATTEMPTS} attempts for {url}: {last_exc}; attempts={attempts}"
+    )
+
+
 def main():
     args = parse_args()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
-        "Referer": SOURCE_URL,
-    })
-
-    response = session.get(SOURCE_URL, timeout=PAGE_TIMEOUT)
-    response.raise_for_status()
+    session = make_session()
+    response, main_attempts = get_with_retries(session, SOURCE_URL)
     raw = response.content
     if not response.encoding or response.encoding.lower() == "iso-8859-1":
         response.encoding = response.apparent_encoding
@@ -205,9 +250,19 @@ def main():
             external_scripts.append(rec)
 
     # Current page JS calls this endpoint on document-ready. Fetch it read-only
-    # and parse only the download callback arguments; do not request the ZIP URL.
-    list_response = session.get(LIST_URL, timeout=PAGE_TIMEOUT)
-    list_response.raise_for_status()
+    # and parse only the download callback arguments; do not request ZIPs here.
+    list_response, list_attempts = get_with_retries(
+        session,
+        LIST_URL,
+        headers={
+            "Referer": SOURCE_URL,
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Connection": "close",
+        },
+    )
     if not list_response.encoding or list_response.encoding.lower() == "iso-8859-1":
         list_response.encoding = list_response.apparent_encoding
     list_html = list_response.text
@@ -253,6 +308,8 @@ def main():
         "list_sha256": sha256_bytes(list_response.content),
         "page_bytes": len(raw),
         "list_bytes": len(list_response.content),
+        "main_request_attempts": main_attempts,
+        "list_request_attempts": list_attempts,
         "expected_marker_found": True,
         "anchor_records": anchors,
         "forms": forms,
@@ -281,6 +338,8 @@ def main():
         "inventory_count": result["inventory_count"],
         "business_years": result["business_years"],
         "latest_business_year": result["latest_business_year"],
+        "main_request_attempts": result["main_request_attempts"],
+        "list_request_attempts": result["list_request_attempts"],
         "status": result["status"],
     }, ensure_ascii=False, indent=2))
 
