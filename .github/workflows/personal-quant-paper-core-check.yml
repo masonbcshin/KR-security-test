@@ -1,0 +1,98 @@
+name: Personal-quant PAPER Core check
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/generate_personal_quant_etf_orders.py
+      - scripts/run_personal_quant_paper_core.py
+      - docs/research/PERSONAL_QUANT_PAPER_CORE_RUNBOOK.md
+      - .github/workflows/personal-quant-paper-core-check.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paper-core-check:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pure execution dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy finance-datareader==0.9.201
+
+      - name: Syntax check
+        run: |
+          python -m py_compile \
+            scripts/generate_personal_quant_etf_orders.py \
+            scripts/run_personal_quant_paper_core.py
+
+      - name: Guard frozen PAPER Core constants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8')
+          g = Path('scripts/generate_personal_quant_etf_orders.py').read_text(encoding='utf-8')
+          for token in (
+              'STRATEGY_ID = "PQ-CORE-60-40-214980-V1"',
+              'DEFENSIVE_CODE = "214980"',
+              'EQUITY_EXPOSURE = 0.60',
+              'DEFENSIVE_EXPOSURE = 0.40',
+              'INITIAL_PAPER_CAPITAL = 100_000_000.0',
+              'BUY_COST = 0.0035',
+              'SELL_COST = 0.0055',
+              'NOOP_DUPLICATE',
+              'WAITING_T1',
+              'REPLAY_BLOCKED',
+              'DATA_NOT_READY',
+          ):
+              assert token in p, token
+          for token in (
+              'EQUITY_EXPOSURE = 0.60',
+              'SAFE_EXPOSURE = 0.40',
+              '"safe": "214980"',
+              'HORIZON = 84',
+              'MAX_FINANCIAL_STALENESS_DAYS = 180',
+          ):
+              assert token in g, token
+          print('paper_core_frozen_guard=PASS')
+          PY
+
+      - name: Guard no brokerage/network submission dependency
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path('scripts/run_personal_quant_paper_core.py').read_text(encoding='utf-8'))
+          roots = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  roots.update(alias.name.split('.')[0] for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  roots.add(node.module.split('.')[0])
+          forbidden = {'requests','httpx','urllib3','socket','aiohttp'}
+          assert not (roots & forbidden), roots & forbidden
+          print('paper_core_no_broker_submission_dependency=PASS')
+          PY
+
+      - name: Run deterministic PAPER state-machine self-test
+        run: |
+          python scripts/run_personal_quant_paper_core.py --self-test | tee paper-core-self-test.log
+
+      - name: Upload self-test log
+        uses: actions/upload-artifact@v4
+        with:
+          name: kr-personal-quant-paper-core-check
+          path: paper-core-self-test.log
+          if-no-files-found: error
+          retention-days: 14
