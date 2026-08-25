@@ -2,23 +2,26 @@
 """Read-only discovery probe for OpenDART financial bulk-download resources.
 
 This script does NOT download/import financial ZIPs and does not touch the DB.
-It snapshots the official page and exposes current link/callback metadata so a
-later downloader can be built from observed current behavior rather than a
-hard-coded legacy URL.
+It snapshots the official page plus its current AJAX inventory and exposes the
+observed download metadata. A later downloader may consume only this observed
+inventory after separate review.
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/main.do"
+LIST_URL = "https://opendart.fss.or.kr/disclosureinfo/fnltt/dwld/list.do"
+DOWNLOAD_BASE = "https://opendart.fss.or.kr/cmm/downloadFnlttZip.do?fl_nm="
 EXPECTED_MARKER = "재무정보 일괄다운로드"
 USER_AGENT = "KR-security-test/1.0 OpenDART bulk-financial discovery (read-only)"
 PAGE_TIMEOUT = 20
@@ -70,6 +73,30 @@ def relevant_lines(text: str, limit: int = 80):
     return rows
 
 
+def parse_download_call(onclick: str):
+    match = re.search(r"download_ext002\s*\((.*?)\)", onclick, flags=re.S)
+    if not match:
+        return None
+    raw_args = match.group(1).strip()
+    try:
+        args = ast.literal_eval("(" + raw_args + ("," if "," not in raw_args else "") + ")")
+    except (ValueError, SyntaxError):
+        return {"raw_args": raw_args, "parse_error": True}
+    if not isinstance(args, tuple):
+        args = (args,)
+    values = [str(x) for x in args]
+    rec = {"raw_args": raw_args, "args": values, "parse_error": False}
+    if len(values) >= 4:
+        rec.update({
+            "business_year": values[0],
+            "document_code": values[1],
+            "role_code": values[2],
+            "file_name": values[3],
+            "download_url_not_requested": DOWNLOAD_BASE + quote(values[3], safe="/._-"),
+        })
+    return rec
+
+
 def main():
     args = parse_args()
     out = Path(args.output)
@@ -79,7 +106,9 @@ def main():
     session.headers.update({
         "User-Agent": USER_AGENT,
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
+        "Referer": SOURCE_URL,
     })
+
     response = session.get(SOURCE_URL, timeout=PAGE_TIMEOUT)
     response.raise_for_status()
     raw = response.content
@@ -89,8 +118,8 @@ def main():
     if EXPECTED_MARKER not in html:
         raise RuntimeError(f"official page marker missing: {EXPECTED_MARKER}")
     (out / "page.html").write_bytes(raw)
-
     soup = BeautifulSoup(html, "html.parser")
+
     anchors = []
     for index, tag in enumerate(soup.find_all("a")):
         href = clean_text(tag.get("href"))
@@ -103,8 +132,7 @@ def main():
                 "href": href,
                 "absolute_href": (
                     urljoin(SOURCE_URL, href)
-                    if href and not href.lower().startswith("javascript:")
-                    else None
+                    if href and not href.lower().startswith("javascript:") else None
                 ),
                 "onclick": onclick,
                 "literals": literals(onclick),
@@ -115,11 +143,7 @@ def main():
     for index, tag in enumerate(soup.find_all("script")):
         src = clean_text(tag.get("src"))
         if src:
-            script_sources.append({
-                "index": index,
-                "src": src,
-                "absolute_src": urljoin(SOURCE_URL, src),
-            })
+            script_sources.append({"index": index, "src": src, "absolute_src": urljoin(SOURCE_URL, src)})
             continue
         body = tag.string or tag.get_text("\n") or ""
         rows = relevant_lines(body)
@@ -152,9 +176,6 @@ def main():
             "fields": fields,
         })
 
-    # If the current HTML already exposes callbacks/inline metadata, do not fan
-    # out across common site JS. Otherwise inspect a strictly bounded sample of
-    # same-origin scripts. Discovery must remain cheap and non-invasive.
     direct_count = sum(1 for a in anchors if a["onclick"] or relevant(a["href"])) + len(inline_scripts)
     external_scripts = []
     if direct_count == 0:
@@ -162,10 +183,8 @@ def main():
         attempts = 0
         for item in script_sources:
             absolute = item["absolute_src"]
-            if urlparse(absolute).netloc != host:
+            if urlparse(absolute).netloc != host or attempts >= MAX_EXTERNAL_SCRIPT_ATTEMPTS:
                 continue
-            if attempts >= MAX_EXTERNAL_SCRIPT_ATTEMPTS:
-                break
             attempts += 1
             rec = dict(item)
             try:
@@ -185,6 +204,34 @@ def main():
                 rec["fetch_error"] = f"{type(exc).__name__}: {exc}"
             external_scripts.append(rec)
 
+    # Current page JS calls this endpoint on document-ready. Fetch it read-only
+    # and parse only the download callback arguments; do not request the ZIP URL.
+    list_response = session.get(LIST_URL, timeout=PAGE_TIMEOUT)
+    list_response.raise_for_status()
+    if not list_response.encoding or list_response.encoding.lower() == "iso-8859-1":
+        list_response.encoding = list_response.apparent_encoding
+    list_html = list_response.text
+    (out / "list.html").write_bytes(list_response.content)
+    list_soup = BeautifulSoup(list_html, "html.parser")
+    inventory = []
+    for row_index, row in enumerate(list_soup.find_all("tr")):
+        row_text = clean_text(row.get_text(" ", strip=True))
+        row_name = clean_text(row.get("name"))
+        for link_index, link in enumerate(row.find_all("a")):
+            onclick = clean_text(link.get("onclick"))
+            parsed = parse_download_call(onclick)
+            if parsed is None:
+                continue
+            inventory.append({
+                "row_index": row_index,
+                "link_index": link_index,
+                "row_name": row_name,
+                "row_text": row_text,
+                "link_text": clean_text(link.get_text(" ", strip=True)),
+                "onclick": onclick,
+                **parsed,
+            })
+
     candidates = []
     for row in anchors:
         if row["onclick"] or relevant(row["href"]):
@@ -195,12 +242,17 @@ def main():
         if row.get("relevant"):
             candidates.append({"source": "external_script", **row})
 
+    years = sorted({r.get("business_year") for r in inventory if r.get("business_year")}, reverse=True)
     result = {
         "source_url": SOURCE_URL,
+        "list_url": LIST_URL,
         "http_status": int(response.status_code),
+        "list_http_status": int(list_response.status_code),
         "content_type": response.headers.get("Content-Type"),
         "page_sha256": sha256_bytes(raw),
+        "list_sha256": sha256_bytes(list_response.content),
         "page_bytes": len(raw),
+        "list_bytes": len(list_response.content),
         "expected_marker_found": True,
         "anchor_records": anchors,
         "forms": forms,
@@ -208,27 +260,27 @@ def main():
         "inline_script_records": inline_scripts,
         "external_script_records": external_scripts,
         "candidate_records": candidates,
-        "candidate_count": len(candidates),
-        "status": "DISCOVERY_METADATA_FOUND" if candidates else "NO_DOWNLOAD_METADATA_FOUND",
+        "inventory_records": inventory,
+        "inventory_count": len(inventory),
+        "business_years": years,
+        "latest_business_year": years[0] if years else None,
+        "status": "INVENTORY_DISCOVERED" if inventory else "DOWNLOAD_CALLBACK_NOT_FOUND",
         "safety": {
             "downloads_financial_zip": False,
             "mutates_database": False,
             "weakens_pit_freshness_gate": False,
         },
     }
-    (out / "discovery.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    (out / "discovery.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({
         "source_url": SOURCE_URL,
         "http_status": result["http_status"],
+        "list_http_status": result["list_http_status"],
         "page_sha256": result["page_sha256"],
-        "anchors": len(anchors),
-        "forms": len(forms),
-        "script_sources": len(script_sources),
-        "inline_relevant_scripts": len(inline_scripts),
-        "external_scripts_attempted": len(external_scripts),
-        "candidate_count": len(candidates),
+        "list_sha256": result["list_sha256"],
+        "inventory_count": result["inventory_count"],
+        "business_years": result["business_years"],
+        "latest_business_year": result["latest_business_year"],
         "status": result["status"],
     }, ensure_ascii=False, indent=2))
 
