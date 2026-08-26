@@ -34,19 +34,24 @@ jobs:
           test -f balanced_trend_v2/backtest.py
           test -f balanced_trend_v2/CONTROL_AUDIT_PROTOCOL.md
           test -f balanced_trend_v2/control_audit.py
+          test -f balanced_trend_v2/FINAL_CHALLENGER_PROTOCOL.md
+          test -f balanced_trend_v2/final_challenger.py
           grep -q '결과 확인 전 사전등록' balanced_trend_v2/PROTOCOL.md
           grep -qi 'bootstrap' balanced_trend_v2/PROTOCOL.md
           grep -q 'static-control audit' balanced_trend_v2/CONTROL_AUDIT_PROTOCOL.md
+          grep -q 'F 결과 확인 전 동결' balanced_trend_v2/FINAL_CHALLENGER_PROTOCOL.md
+          grep -q '160/180/200/220/240 전체를 동일가중' balanced_trend_v2/FINAL_CHALLENGER_PROTOCOL.md
           grep -q 'A_current_v1' balanced_trend_v2/backtest.py
           grep -q 'E_robust_risk_managed' balanced_trend_v2/backtest.py
           grep -q 'Z_static_fixed' balanced_trend_v2/control_audit.py
+          grep -q 'F_sma_grid_ensemble' balanced_trend_v2/final_challenger.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install -r balanced_trend_v2/requirements.txt
       - name: Syntax check
-        run: python -m py_compile balanced_trend_v2/backtest.py balanced_trend_v2/control_audit.py
+        run: python -m py_compile balanced_trend_v2/backtest.py balanced_trend_v2/control_audit.py balanced_trend_v2/final_challenger.py
       - name: Run preregistered tournament
         id: research
         continue-on-error: true
@@ -55,6 +60,10 @@ jobs:
         id: control
         continue-on-error: true
         run: python balanced_trend_v2/control_audit.py 2>&1 | tee balanced_trend_v2/control_run.log
+      - name: Run frozen final challenger
+        id: final
+        continue-on-error: true
+        run: python balanced_trend_v2/final_challenger.py 2>&1 | tee balanced_trend_v2/final_run.log
       - name: Build result comment
         if: always()
         shell: bash
@@ -76,6 +85,13 @@ jobs:
               log=Path('balanced_trend_v2/control_run.log')
               tail='\n'.join(log.read_text(encoding='utf-8',errors='replace').splitlines()[-30:]) if log.exists() else 'no control run log'
               parts += ['','## Static-control audit failed','','```text',tail,'```']
+          f=Path('balanced_trend_v2/out_final/FINAL_REPORT.md')
+          if f.exists():
+              parts += ['','## Final frozen challenger','',f.read_text(encoding='utf-8')]
+          else:
+              log=Path('balanced_trend_v2/final_run.log')
+              tail='\n'.join(log.read_text(encoding='utf-8',errors='replace').splitlines()[-30:]) if log.exists() else 'no final run log'
+              parts += ['','## Final challenger failed','','```text',tail,'```']
           Path('balanced_trend_v2/result-comment.md').write_text('\n'.join(parts)+'\n',encoding='utf-8')
           PY
       - name: Comment result
@@ -92,10 +108,12 @@ jobs:
           path: |
             balanced_trend_v2/out
             balanced_trend_v2/out_control
+            balanced_trend_v2/out_final
             balanced_trend_v2/run.log
             balanced_trend_v2/control_run.log
+            balanced_trend_v2/final_run.log
           if-no-files-found: warn
           retention-days: 14
       - name: Fail if research failed
-        if: steps.research.outcome != 'success' || steps.control.outcome != 'success'
+        if: steps.research.outcome != 'success' || steps.control.outcome != 'success' || steps.final.outcome != 'success'
         run: exit 1
