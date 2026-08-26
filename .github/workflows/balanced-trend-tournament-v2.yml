@@ -1,0 +1,32 @@
+name: balanced-trend-tournament-v2
+
+on:
+  push:
+    branches:
+      - research/balanced-trend-tournament-v2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r balanced_trend_v2/requirements.txt
+      - name: Syntax check
+        run: python -m py_compile balanced_trend_v2/backtest.py
+      - name: Run preregistered tournament
+        run: python balanced_trend_v2/backtest.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: balanced-trend-v2-results
+          path: balanced_trend_v2/out
+          if-no-files-found: error
