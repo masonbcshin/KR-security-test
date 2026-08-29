@@ -1,0 +1,72 @@
+name: Gold instrument ablation
+
+on:
+  push:
+    branches:
+      - research/gold-instrument-ablation-v1
+    paths:
+      - 'gold_instrument_ablation/**'
+      - '.github/workflows/gold-instrument-ablation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard preregistration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f gold_instrument_ablation/PROTOCOL.md
+          test -f gold_instrument_ablation/CONFIRMATORY_PROTOCOL.md
+          test -f gold_instrument_ablation/ETN_PROXY_PROTOCOL.md
+          test -f gold_instrument_ablation/ETN_DATA_SOURCE_AMENDMENT.md
+          test -f gold_instrument_ablation/backtest.py
+          test -f gold_instrument_ablation/etn_proxy_backtest_naver.py
+          grep -q '결과를 확인하기 전에' gold_instrument_ablation/PROTOCOL.md
+          grep -q '132030.KS' gold_instrument_ablation/backtest.py
+          grep -q '411060.KS' gold_instrument_ablation/backtest.py
+          grep -q 'SPOT_REPLACEMENT_EVIDENCE_STRONG' gold_instrument_ablation/PROTOCOL.md
+          grep -q 'KRX_SPOT_LONG_PROXY_SUPPORTS_REPLACEMENT' gold_instrument_ablation/ETN_PROXY_PROTOCOL.md
+          grep -q '판정 규칙은 변경하지 않는다' gold_instrument_ablation/ETN_DATA_SOURCE_AMENDMENT.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r gold_instrument_ablation/requirements.txt
+      - name: Syntax check
+        run: python -m py_compile gold_instrument_ablation/backtest.py gold_instrument_ablation/discover_krx_gold_index.py gold_instrument_ablation/etn_proxy_backtest_naver.py
+      - name: Discover official KRX gold index code
+        shell: bash
+        run: |
+          set -o pipefail
+          python gold_instrument_ablation/discover_krx_gold_index.py 2>&1 | tee gold_instrument_ablation/index_discovery.log
+      - name: Run frozen actual and synthetic research
+        shell: bash
+        run: |
+          set -o pipefail
+          python gold_instrument_ablation/backtest.py 2>&1 | tee gold_instrument_ablation/run.log
+      - name: Run frozen KRX spot ETN proxy confirmation
+        shell: bash
+        run: |
+          set -o pipefail
+          python gold_instrument_ablation/etn_proxy_backtest_naver.py 2>&1 | tee gold_instrument_ablation/etn_run.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-instrument-ablation-results
+          path: |
+            gold_instrument_ablation/out
+            gold_instrument_ablation/out_etn
+            gold_instrument_ablation/run.log
+            gold_instrument_ablation/etn_run.log
+            gold_instrument_ablation/index_discovery.json
+            gold_instrument_ablation/index_discovery.log
+          if-no-files-found: warn
+          retention-days: 14
