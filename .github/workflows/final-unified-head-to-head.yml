@@ -1,0 +1,49 @@
+name: Final Unified Head-to-Head
+
+on:
+  push:
+    branches:
+      - research/final-unified-head-to-head-20260902
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: unified_head_to_head/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r unified_head_to_head/requirements.txt
+
+      - name: Run unified tournament
+        run: python unified_head_to_head/run_unified.py
+
+      - name: Show verdict
+        if: always()
+        run: |
+          if [ -f unified_head_to_head/out/FINAL_UNIFIED_RESULT.md ]; then
+            cat unified_head_to_head/out/FINAL_UNIFIED_RESULT.md
+          fi
+          if [ -f unified_head_to_head/out/verdict.json ]; then
+            cat unified_head_to_head/out/verdict.json
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-unified-head-to-head
+          path: unified_head_to_head/out
+          if-no-files-found: warn
