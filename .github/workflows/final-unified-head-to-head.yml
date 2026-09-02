@@ -28,7 +28,7 @@ jobs:
         run: pip install -r unified_head_to_head/requirements.txt
 
       - name: Run unified tournament
-        run: python unified_head_to_head/run_unified.py
+        run: python unified_head_to_head/run_authoritative.py
 
       - name: Show verdict
         if: always()
