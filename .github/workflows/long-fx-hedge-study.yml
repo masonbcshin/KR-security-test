@@ -19,6 +19,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f fx_hedge_longstudy/PROTOCOL.md
+          test -f fx_hedge_inputs/FALLBACK_US_2020_04.csv
           grep -q 'Results-blind preregistration' fx_hedge_longstudy/PROTOCOL.md
           grep -q '1998-01' fx_hedge_longstudy/run.py
           grep -q 'DEXKOUS' fx_hedge_longstudy/run.py
