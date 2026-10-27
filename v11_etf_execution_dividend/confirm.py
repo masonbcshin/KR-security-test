@@ -229,7 +229,12 @@ def main():
     metrics,results,common=calculate_common(data)
     metrics.to_csv(OUT/"common_cohort_metrics.csv",index=False)
     (OUT/"common_cohort_summary.json").write_text(json.dumps(results,ensure_ascii=False,indent=2))
-    dividend_ok=all(v["pass"] for v in audits) and bool(identities) and all(v["within_20bp"] for v in identities)
+    dividend_ok={
+        s:(all(v["pass"] for v in audits if v["symbol"]==s)
+           and any(v["symbol"]==s for v in identities)
+           and all(v["within_20bp"] for v in identities if v["symbol"]==s))
+        for s in OFFICIAL
+    }
     gates={}
     for r in results:
         cand=r["symbol"]
@@ -244,7 +249,7 @@ def main():
                 "cost50":bool(get("candidate",50.).sharpe>get("baseline",50.).sharpe),
                 "next_close":bool(get("candidate",10.,"next_close").sharpe>get("baseline",10.,"next_close").sharpe)}
         gates[cand]={"checks":checks,"historical_pass":all(checks.values()),
-                     "dividend_parity_verified":dividend_ok if cand in (H,"448290") else None,
+                     "dividend_parity_verified":dividend_ok.get(cand),
                      "09_10_actual_quote_verified":False,
                      "KIS_SMA_parity_verified":False,
                      "real_promotion":"BLOCKED"}
