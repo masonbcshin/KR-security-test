@@ -21,7 +21,7 @@ jobs:
           set -euo pipefail
           test -f v11_etf_execution_dividend/PROTOCOL.md
           grep -q '411060 gold spot 15%' v11_etf_execution_dividend/PROTOCOL.md
-          grep -q '250 bars' v11_etf_execution_dividend/PROTOCOL.md
+          grep -q '250 daily bars' v11_etf_execution_dividend/PROTOCOL.md
           grep -q '09:10' v11_etf_execution_dividend/quote_0910_gate.py
           grep -q 'REAL_PROMOTION_BLOCKED' v11_etf_execution_dividend/confirm.py
       - uses: actions/setup-python@v5
