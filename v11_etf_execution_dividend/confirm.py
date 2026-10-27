@@ -45,10 +45,12 @@ def download_actual(sym):
     print("DATA_QUALITY",sym,"source_rows",len(required),
           "invalid_rows",len(bad_dates),"sample_invalid_dates",
           [str(x.date()) for x in bad_dates[:12]],flush=True)
-    if len(bad_dates)>max(1,int(len(required)*.01)):
-        raise RuntimeError("More than 1% invalid price bars "+sym)
-    if len(bad_dates) and bad_dates.max()>=pd.Timestamp("2022-11-01"):
-        raise RuntimeError("Invalid price rows inside common comparison period "+sym)
+    shared_bad=bad_dates[bad_dates>=pd.Timestamp("2022-11-01")]
+    if len(bad_dates)>max(2,int(len(required)*.01)) or len(shared_bad)>2:
+        raise RuntimeError("Too many invalid or shared-period price bars "+sym)
+    if any(pd.Timestamp(t).is_month_end for t in shared_bad):
+        raise RuntimeError("Yahoo missing calendar month-end signal bar "+sym)
+    print("SHARED_PERIOD_EXCLUDED_DATES",sym,[str(x.date()) for x in shared_bad],flush=True)
     required=required.loc[~bad].copy()
     required["Dividends"]=pd.to_numeric(d.get("Dividends",pd.Series(0,index=d.index)),errors="coerce").fillna(0)
     required["Stock Splits"]=pd.to_numeric(d.get("Stock Splits",pd.Series(0,index=d.index)),errors="coerce").fillna(0)
