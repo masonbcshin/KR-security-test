@@ -1,0 +1,45 @@
+name: Historical FX hedge 1998 to 2026
+on:
+  push:
+    branches: [research/fx-hedge-long-1998-2026]
+    paths:
+      - 'fx_hedge_longstudy/**'
+      - '.github/workflows/long-fx-hedge-study.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pre-registered study
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f fx_hedge_longstudy/PROTOCOL.md
+          grep -q 'Results-blind preregistration' fx_hedge_longstudy/PROTOCOL.md
+          grep -q '1998-01' fx_hedge_longstudy/run.py
+          grep -q 'DEXKOUS' fx_hedge_longstudy/run.py
+          grep -q 'IR3TIB01KRM156N' fx_hedge_longstudy/run.py
+          grep -q 'IR3TIB01USM156N' fx_hedge_longstudy/run.py
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r fx_hedge_longstudy/requirements.txt
+      - run: python -m py_compile fx_hedge_longstudy/run.py
+      - name: Execute frozen research
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u fx_hedge_longstudy/run.py 2>&1 | tee fx_hedge_longstudy/run.log
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp500-1998-2026-fx-hedge-results
+          path: |
+            fx_hedge_longstudy/out
+            fx_hedge_longstudy/run.log
+          if-no-files-found: warn
+          retention-days: 14
