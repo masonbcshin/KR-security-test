@@ -30,7 +30,7 @@ OFFICIAL={
     "448290":[("2026-07-31",42.),("2026-04-30",40.),("2026-01-30",41.),("2025-10-31",40.)],
 }
 def download_actual(sym):
-    d=yf.download(sym+".KS",start="2010-01-01",end="2026-10-01",auto_adjust=False,actions=True,
+    d=yf.download(sym+".KS",start="2010-01-01",end="2026-10-10",auto_adjust=False,actions=True,
                   progress=False,threads=False,timeout=35)
     if isinstance(d.columns,pd.MultiIndex):
         d=d.xs(sym+".KS",level=-1,axis=1) if sym+".KS" in d.columns.get_level_values(-1) else d.xs(sym+".KS",level=0,axis=1)
@@ -99,6 +99,22 @@ def dist_audit(sym,d):
                      "yahoo_amount":float(nearby.iloc[0]) if len(nearby) else None,
                      "pass":exact})
     return rows
+
+def dividend_total_return_identity(d, sym):
+    rows=[]
+    dividends=d.loc[d["Dividends"]>0,"Dividends"]
+    for ex_day,amount in dividends.items():
+        prior=d.index.searchsorted(ex_day)-1
+        if prior<0:continue
+        prior_day=d.index[prior]
+        price_return=(float(d.loc[ex_day,"Close"])+float(amount))/float(d.loc[prior_day,"Close"])-1
+        adj_return=float(d.loc[ex_day,"Adj Close"])/float(d.loc[prior_day,"Adj Close"])-1
+        diff_bp=10000*(adj_return-price_return)
+        rows.append({"symbol":sym,"yahoo_ex_date":str(ex_day.date()),"amount":float(amount),
+                     "gross_cash_inclusive_return":price_return,"adjusted_return":adj_return,
+                     "difference_bp":diff_bp,"within_20bp":abs(diff_bp)<=20})
+    return rows
+
 
 def signal_audit(d, symbols):
     idx=None
@@ -198,6 +214,11 @@ def main():
     data[MIX]=monthly_hedge_pair(data[H],data[U])
     audits=[v for s in OFFICIAL for v in dist_audit(s,data[s])]
     (OUT/"distribution_audit.json").write_text(json.dumps(audits,ensure_ascii=False,indent=2))
+    identities=[v for s in OFFICIAL for v in dividend_total_return_identity(data[s],s)]
+    (OUT/"distribution_return_identity.json").write_text(json.dumps(identities,ensure_ascii=False,indent=2))
+    print("DIVIDEND_TOTAL_RETURN_IDENTITY",len(identities),
+          "max_abs_difference_bp",max([abs(v["difference_bp"]) for v in identities],default=None),
+          "all_within_20bp",all(v["within_20bp"] for v in identities),flush=True)
     (OUT/"price_history_manifest.json").write_text(json.dumps(
        [{"symbol":s,"rows":len(d),"start":str(d.index.min().date()),"end":str(d.index.max().date()),
          "dividend_events":int((d["Dividends"]>0).sum()) if "Dividends" in d else None} for s,d in data.items()],
@@ -208,7 +229,7 @@ def main():
     metrics,results,common=calculate_common(data)
     metrics.to_csv(OUT/"common_cohort_metrics.csv",index=False)
     (OUT/"common_cohort_summary.json").write_text(json.dumps(results,ensure_ascii=False,indent=2))
-    dividend_ok=all(v["pass"] for v in audits)
+    dividend_ok=all(v["pass"] for v in audits) and bool(identities) and all(v["within_20bp"] for v in identities)
     gates={}
     for r in results:
         cand=r["symbol"]
