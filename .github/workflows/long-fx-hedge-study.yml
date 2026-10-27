@@ -27,12 +27,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip install -r fx_hedge_longstudy/requirements.txt
-      - run: python -m py_compile fx_hedge_longstudy/run.py
+      - run: python -m py_compile fx_hedge_longstudy/run.py fx_hedge_mirror/dbnomics_main.py
       - name: Execute frozen research
         shell: bash
         run: |
           set -euo pipefail
-          python -u fx_hedge_longstudy/run.py 2>&1 | tee fx_hedge_longstudy/run.log
+          python -u fx_hedge_mirror/dbnomics_main.py 2>&1 | tee fx_hedge_longstudy/run.log
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@v4
