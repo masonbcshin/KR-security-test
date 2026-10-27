@@ -143,7 +143,7 @@ def calculate_common(data):
                     # frozen_base.periods is replaced by following per-version actual target weights.
                     sim=run_strategy(raw,adj,ao,exe,code,bp)
                     if sim.empty:raise RuntimeError("no strategy periods")
-                    stat=base.stats(sim.rename(columns={"net":"return","cashret":"rf"}))
+                    stat=base.summary(sim.rename(columns={"cashret":"rf"}))
                     csv.append({"symbol":candidate,"version":who,"execution":exe,"cost_bp":bp,**stat})
         cand=[x for x in csv if x["symbol"]==candidate and x["version"]=="candidate"
               and x["execution"]=="next_open" and x["cost_bp"]==10.][0]
