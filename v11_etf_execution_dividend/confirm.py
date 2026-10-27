@@ -40,8 +40,16 @@ def download_actual(sym):
     d=d.sort_index()
     required=d[["Open","Close","Adj Close"]].apply(pd.to_numeric,errors="coerce")
     required["Adj Open"]=required["Open"]*required["Adj Close"]/required["Close"]
-    if required.isna().any().any() or (required<=0).any().any():
-        raise RuntimeError("Invalid actual price bars: "+sym)
+    bad=required.isna().any(axis=1) | (required<=0).any(axis=1) | ~np.isfinite(required).all(axis=1)
+    bad_dates=required.index[bad]
+    print("DATA_QUALITY",sym,"source_rows",len(required),
+          "invalid_rows",len(bad_dates),"sample_invalid_dates",
+          [str(x.date()) for x in bad_dates[:12]],flush=True)
+    if len(bad_dates)>max(1,int(len(required)*.01)):
+        raise RuntimeError("More than 1% invalid price bars "+sym)
+    if len(bad_dates) and bad_dates.max()>=pd.Timestamp("2022-11-01"):
+        raise RuntimeError("Invalid price rows inside common comparison period "+sym)
+    required=required.loc[~bad].copy()
     required["Dividends"]=pd.to_numeric(d.get("Dividends",pd.Series(0,index=d.index)),errors="coerce").fillna(0)
     required["Stock Splits"]=pd.to_numeric(d.get("Stock Splits",pd.Series(0,index=d.index)),errors="coerce").fillna(0)
     if len(required)<250:raise RuntimeError("Less than 250 ETF observations "+sym)
