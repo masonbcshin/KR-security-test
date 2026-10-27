@@ -1,0 +1,6 @@
+# 2026-10-28 calculation-completeness and distribution identity amendment
+
+Post-observation: Run 40601062373 produced 32 valid months Jan-2024..Aug-2026 but the intended Sep-2026 completed return was omitted: Yahoo request stopped at 2026-10-01 exclusive, while the agreed month-end-next-session method needs the **first October execution price** to value the final September signal period. This is a horizon-end mechanical defect, not a choice of winner. Download ONLY through 2026-10-09 (no October incomplete month-end signal), include the September portfolio return through October's first session, while retaining all strategies' comparable data windows and weights. No Oct 2026 performance is to be included.
+
+Additional distribution parity on 449180,448290: ex-date gross dividend-inclusive 1-day `(Close_t + Dividend_t)/Close_t-1` versus Yahoo adjusted-close return on the same ex-date; report max absolute bp deviation and all individual dates. This checks no missed/double counting of **gross** dividend events. It does NOT verify brokerage cash posting, tax withholding, or same-day reinvestment.
+All predeclared strategy parameters, 250 input bars, 200 SMA, 10/25/50bp and no 09:10 proof remain unchanged.
