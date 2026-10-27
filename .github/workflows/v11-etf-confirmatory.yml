@@ -1,0 +1,57 @@
+name: v1.1 ETF portfolio, dividends and 09:10 execution gates
+on:
+  push:
+    branches:
+      - research/v1-1-portfolio-etf-dividend-execution
+    paths:
+      - 'v11_etf_execution_dividend/**'
+      - '.github/workflows/v11-etf-confirmatory.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frozen strategy and safety guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f v11_etf_execution_dividend/PROTOCOL.md
+          grep -q '411060 gold spot 15%' v11_etf_execution_dividend/PROTOCOL.md
+          grep -q '250 bars' v11_etf_execution_dividend/PROTOCOL.md
+          grep -q '09:10' v11_etf_execution_dividend/quote_0910_gate.py
+          grep -q 'REAL_PROMOTION_BLOCKED' v11_etf_execution_dividend/confirm.py
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r v11_etf_execution_dividend/requirements.txt
+      - name: Compile
+        run: python -m py_compile v11_etf_execution_dividend/frozen_base.py v11_etf_execution_dividend/confirm.py v11_etf_execution_dividend/quote_0910_gate.py
+      - name: Test fail-closed 09:10 gate without real quotes
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch /tmp/empty-quotes.jsonl
+          python v11_etf_execution_dividend/quote_0910_gate.py --input /tmp/empty-quotes.jsonl --output /tmp/empty-report.json
+          python - <<'PY'
+          import json
+          d=json.load(open('/tmp/empty-report.json'))
+          assert len(d)>5 and all(x['gate']=='UNVERIFIED_NO_AUTHENTICATED_0910_QUOTE' for x in d)
+          PY
+      - name: Full v1.1 ETF research
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u v11_etf_execution_dividend/confirm.py 2>&1 | tee v11_etf_execution_dividend/run.log
+      - name: Archive evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v11-portfolio-dividend-0910-study
+          path: |
+            v11_etf_execution_dividend/out
+            v11_etf_execution_dividend/run.log
+          retention-days: 14
+          if-no-files-found: warn
