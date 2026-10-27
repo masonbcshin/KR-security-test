@@ -1,0 +1,47 @@
+name: Full S&P500 issuer ablation
+on:
+  push:
+    branches:
+      - research/sp500-all-issuers-ablation-202610
+    paths:
+      - 'sp500_issuer_study/**'
+      - '.github/workflows/full-sp500-issuer-ablation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frozen preregistration guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f sp500_issuer_study/PROTOCOL.md
+          test -f sp500_issuer_study/backtest.py
+          grep -q '결과 보기 전' sp500_issuer_study/PROTOCOL.md
+          grep -q '143850' sp500_issuer_study/backtest.py
+          grep -q '0026S0' sp500_issuer_study/backtest.py
+          grep -q '411060' sp500_issuer_study/backtest.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r sp500_issuer_study/requirements.txt
+      - run: python -m py_compile sp500_issuer_study/backtest.py
+      - name: Research (failure propagates)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u sp500_issuer_study/backtest.py 2>&1 | tee sp500_issuer_study/run.log
+      - name: Archive complete results, even on error
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-sp500-issuer-ablation
+          path: |
+            sp500_issuer_study/out
+            sp500_issuer_study/run.log
+          if-no-files-found: warn
+          retention-days: 14
